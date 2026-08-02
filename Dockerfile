@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 
-# git is required for the docs mirror pull loop; openssh-client for the
-# forced-command host diag (storage_*/system_* host checks)
-RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client \
+# git for the docs mirror pull loop; openssh-client for the forced-command
+# host diag; iputils-ping for the router-alive / ping-nodes checks
+RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
