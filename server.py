@@ -55,11 +55,19 @@ mcp = FastMCP(
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[
+            # exact (no-port) entries — Traefik forwards Host: mcp.ffilt.us
+            "127.0.0.1", "localhost", "[::1]",
+            "192.168.1.2", "192.168.1.50", "192.168.1.150",
+            "mcp.ffilt.us",
+            # port-qualified + wildcard (SDK matches base+":" prefix)
             "127.0.0.1:*", "localhost:*", "[::1]:*",
             "192.168.1.2:*", "192.168.1.50:*", "192.168.1.150:*",
             "mcp.ffilt.us:*", "*.ffilt.us:*",
         ],
         allowed_origins=[
+            "http://127.0.0.1", "http://localhost", "http://[::1]",
+            "http://192.168.1.2", "http://192.168.1.50", "http://192.168.1.150",
+            "http://mcp.ffilt.us",
             "http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*",
             "http://192.168.1.2:*", "http://192.168.1.50:*", "http://192.168.1.150:*",
             "http://mcp.ffilt.us:*", "http://*.ffilt.us:*",
