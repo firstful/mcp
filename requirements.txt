@@ -1,0 +1,6 @@
+# Pin mcp to the same major as the Hermes native client (1.26.0) —
+# protocol negotiation is safest when server and client versions match.
+mcp==1.26.0
+fastapi>=0.110
+uvicorn>=0.29
+kubernetes>=28.0
