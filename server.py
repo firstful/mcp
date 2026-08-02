@@ -30,7 +30,10 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 import docs_index
+import gitea_tools
 import k3s_tools
+import storage_tools
+import system_checks
 from todos_store import DEFAULT_TTL, TodoError, TodosStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -50,7 +53,10 @@ mcp = FastMCP(
         "  todo_*  — shared task store with leases (create/claim/complete/list)\n"
         "  docs_*  — full-text search over the homelab-docs repo (search/get/list)\n"
         "  k3s_*   — read-only Kubernetes cluster queries (services/pods/nodes/...)\n"
-        "All tools return JSON strings. Prefer k3s_* over raw kubectl."
+        "  gitea_* — read-only Gitea queries (repos/PRs/issues/actions/files)\n"
+        "  storage_* — host storage via system calls (df/mdadm/smartctl)\n"
+        "  system_*  — opaque health checks (system_check_status / system_list_checks)\n"
+        "All tools return JSON strings. Prefer k3s_* over raw kubectl, system_* for health."
     ),
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -292,6 +298,115 @@ def k3s_list_storageclasses() -> str:
 def k3s_list_events(namespace: str | None = None, limit: int = 50) -> str:
     """Recent Events (warnings usually first). limit max 200."""
     return k3s_tools.list_events(namespace=namespace, limit=limit)
+
+
+# ================================================================ gitea_*
+@mcp.tool()
+def gitea_list_repos(owner: str = "reeds") -> str:
+    """List Gitea repos for an owner (default reeds): name, description, private,
+    default branch, updated time, issue/star/fork counts."""
+    return gitea_tools.list_repos(owner=owner)
+
+
+@mcp.tool()
+def gitea_get_repo(owner: str, name: str) -> str:
+    """Get one Gitea repo (owner/name): clone URLs, size, counts, timestamps."""
+    return gitea_tools.get_repo(owner, name)
+
+
+@mcp.tool()
+def gitea_list_prs(owner: str, repo: str, state: str = "open", limit: int = 20) -> str:
+    """List pull requests (state: open|closed|all). Includes mergeable when known."""
+    return gitea_tools.list_prs(owner, repo, state=state, limit=limit)
+
+
+@mcp.tool()
+def gitea_get_pr(owner: str, repo: str, number: int) -> str:
+    """Get one pull request by number: full detail incl. mergeability + files changed."""
+    return gitea_tools.get_pr(owner, repo, number)
+
+
+@mcp.tool()
+def gitea_list_issues(owner: str, repo: str, state: str = "open", limit: int = 20) -> str:
+    """List issues (state: open|closed|all). Pull requests are excluded (type=issues)."""
+    return gitea_tools.list_issues(owner, repo, state=state, limit=limit)
+
+
+@mcp.tool()
+def gitea_get_issue(owner: str, repo: str, number: int) -> str:
+    """Get one issue by number: full detail incl. body + labels + comments count."""
+    return gitea_tools.get_issue(owner, repo, number)
+
+
+@mcp.tool()
+def gitea_list_action_runs(owner: str, repo: str, limit: int = 10) -> str:
+    """List Gitea Actions workflow runs for a repo: id, name, status, conclusion, sha."""
+    return gitea_tools.list_action_runs(owner, repo, limit=limit)
+
+
+@mcp.tool()
+def gitea_get_action_run(owner: str, repo: str, run_id: int) -> str:
+    """Get one Actions run by id, including its jobs (name, status, conclusion)."""
+    return gitea_tools.get_action_run(owner, repo, run_id)
+
+
+@mcp.tool()
+def gitea_action_run_logs(owner: str, repo: str, run_id: int, job_id: int | None = None) -> str:
+    """Fetch Actions run logs (raw text, last ~8k chars per job). If job_id omitted,
+    concatenates all jobs of the run."""
+    return gitea_tools.action_run_logs(owner, repo, run_id, job_id=job_id)
+
+
+@mcp.tool()
+def gitea_list_contents(owner: str, repo: str, path: str = "", ref: str = "") -> str:
+    """List a directory in a repo (or describe a file). ref = branch/tag/sha."""
+    return gitea_tools.list_contents(owner, repo, path=path, ref=ref)
+
+
+@mcp.tool()
+def gitea_get_file(owner: str, repo: str, path: str, ref: str = "") -> str:
+    """Get the full content of one file in a repo (decoded). ref = branch/tag/sha."""
+    return gitea_tools.get_file(owner, repo, path, ref=ref)
+
+
+# ================================================================ storage_*
+@mcp.tool()
+def storage_disk_usage() -> str:
+    """df on the host: real filesystems with size/used/avail/pct (system call)."""
+    return storage_tools.disk_usage()
+
+
+@mcp.tool()
+def storage_raid_status() -> str:
+    """mdadm RAID array status from the host (/proc/mdstat + mdadm --detail)."""
+    return storage_tools.raid_status()
+
+
+@mcp.tool()
+def storage_smart_health() -> str:
+    """SMART health per physical disk on the host (smartctl -H; slower — ~seconds/disk)."""
+    return storage_tools.smart_health()
+
+
+@mcp.tool()
+def storage_disks() -> str:
+    """Physical disks on the host from lsblk (name, size, model) — fast, no smartctl."""
+    return storage_tools.disks()
+
+
+# ================================================================ system_*
+@mcp.tool()
+def system_list_checks() -> str:
+    """List available system health checks (lowercase-hyphen ids) with descriptions."""
+    return system_checks.list_checks()
+
+
+@mcp.tool()
+def system_check_status(checks: list[str] | None = None) -> str:
+    """Run opaque system health checks. checks is a list of check ids
+    (lowercase-hyphen, see system_list_checks); empty/null runs ALL checks.
+    Each result: {id, status: pass|warn|fail|error, detail, took_ms}."""
+    return system_checks.check_status(checks)
 
 
 # The MCP Starlette app serves its own streamable_http_path (/mcp by default)
