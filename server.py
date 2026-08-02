@@ -479,7 +479,7 @@ def _http(e: TodoError) -> HTTPException:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "mcp", "tools": ["todo_*", "docs_*", "k3s_*"]}
+    return {"status": "ok", "service": "mcp", "tools": ["todo_*", "docs_*", "k3s_*", "gitea_*", "storage_*", "system_*"]}
 
 
 @app.get("/")
@@ -487,8 +487,8 @@ def root():
     return {
         "service": "mcp",
         "mcp_endpoint": "/mcp",
-        "tool_families": ["todo_*", "docs_*", "k3s_*"],
-        "docs": "mcp.ffilt.us — unified agent tools (todo/docs/k3s)",
+        "tool_families": ["todo_*", "docs_*", "k3s_*", "gitea_*", "storage_*", "system_*"],
+        "docs": "mcp.ffilt.us — unified agent tools (todo/docs/k3s/gitea/storage/system)",
     }
 
 
