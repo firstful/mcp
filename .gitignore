@@ -1,8 +1,5 @@
 __pycache__/
 *.pyc
 .venv/
-venv/
-*.db
-*.db-wal
-*.db-shm
-docs-mirror/
+smoke_*.py
+e2e_client.py

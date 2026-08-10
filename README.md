@@ -1,13 +1,38 @@
 # mcp — unified agent MCP service
 
 Single MCP StreamableHTTP server for agents, hosted on the k3s cluster at
-`http://mcp.ffilt.us/mcp`. Tool families (all return JSON strings):
+`http://mcp.ffilt.us/mcp`.
+
+## Dynamic tool surface (since 1.2.0)
+
+The MCP tool list is discoverable instead of fixed. Three meta tools are
+always registered; the other 47 are found via semantic search over a tiny
+embedding database (one row per tool: name, description, input schema, and a
+384-dim MiniLM vector produced by the homelab `embeddings` service):
+
+| Meta tool | Purpose |
+|-----------|---------|
+| `discover_tool(query, top_k?, min_score?)` | Semantic search over the catalog → ranked `{name, family, description, input_schema, score}`. Falls back to keyword matching if the embeddings service is down. |
+| `execute_tool(tool_name, payload?)` | Validate `payload` against the discovered input schema and dispatch. Returns `{ok, tool, result}` or `{ok:false, tool, error:{type, message}}`. |
+| `tool_catalog()` | Cheap enumeration: name / family / one-line description (no schemas). |
+
+Workflow: `discover_tool('manage pods')` → `execute_tool('k3s_list_pods', {"namespace": "mcp"})`.
+
+Tool families (all return JSON strings):
 
 | Prefix  | Tools | Purpose |
 |---------|-------|---------|
 | `todo_*`  | create, list, get, claim, complete, release, renew, delete, summary, events | Shared task store with leases/TTL (SQLite, Longhorn PVC) |
 | `docs_*`  | search, get, list, index_status, refresh_index | FTS5 full-text search over `reeds/homelab-docs` mirror |
 | `k3s_*`   | nodes, namespaces, list/get services, pods, logs, deployments, statefulsets, daemonsets, ingressroutes, pvcs, storageclasses, events | Read-only Kubernetes cluster queries (in-cluster SA RBAC) |
+| `gitea_*` | repos, PRs, issues, actions runs/jobs/logs, contents, files | Read-only Gitea API |
+| `storage_*` | disk_usage, raid_status, smart_health, disks | Host storage via system calls |
+| `system_*` | list_checks, check_status | Opaque health checks |
+
+The legacy static surface stays registered while `STATIC_TOOLS != "0"`.
+Set `STATIC_TOOLS=0` for dynamic-only (client sees just the 3 meta tools).
+Both surfaces draw from the same registry (`tool_registry.py`), so the
+embedding index and the tool list can never drift.
 
 ## Run locally (dev)
 
@@ -25,6 +50,10 @@ export TODOS_DB=/tmp/mcp-todos.db DOCS_REPO_DIR=/srv/homelab-docs-mirror DOCS_IN
 - `DOCS_REPO_DIR` (default `/data/docs-mirror`), `DOCS_INDEX_DB` (default `/data/docs-index.db`)
 - `DOCS_GIT_URL` — clone URL (creds embedded) used when the mirror is missing
 - `DOCS_AUTO_PULL`, `DOCS_PULL_INTERVAL`, `DOCS_WATCH_INTERVAL`
+- `TOOLS_INDEX_DB` (default `/data/tool-index.db`) — the tool embedding DB
+- `EMBEDDINGS_URL` (default `http://embeddings.embeddings.svc.cluster.local`) — homelab embeddings service
+- `EMBED_TIMEOUT` (default `10`) — HTTP timeout for embed calls
+- `STATIC_TOOLS` (`1` default) — `0` disables the legacy static tool surface
 
 ## Deploy
 

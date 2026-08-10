@@ -4,14 +4,28 @@ Single uvicorn process serving:
   - GET  /health                     liveness
   - GET  /                           service info
   - GET  /api/summary, /api/todos…   REST passthrough for the todos store
-                                      (kept from the old host service so
-                                      existing consumers don't break)
-  - MCP  /mcp                        Streamable HTTP — tools prefixed
-                                      todo_*, docs_*, k3s_*
+                                    (kept from the old host service so
+                                    existing consumers don't break)
+  - GET  /api/tools                  dynamic tool catalog (REST)
+  - POST /api/tools/reindex          rebuild the tool embedding index
+  - MCP  /mcp                        Streamable HTTP
+
+Dynamic tool surface (the point of this refactor):
+  - discover_tool(query, top_k, min_score) — semantic search over the tool
+    catalog (embedding DB in tool_vectors.py, fed by the homelab embeddings
+    service; keyword fallback if it's down). Returns names, descriptions and
+    input schemas for the ranked hits.
+  - execute_tool(tool_name, payload)     — validate the payload against the
+    discovered schema and dispatch to the registered callable.
+  - tool_catalog()                       — cheap enumeration (no schemas).
+
+The legacy static surface (all 47 todo_*/docs_*/k3s_*/gitea_*/storage_*/system_*
+tools) stays registered while STATIC_TOOLS != "0" — both paths draw from the
+same ToolRegistry, so they can't drift.
 
 Runs in k3s (ns `mcp`), exposed at http://mcp.ffilt.us/mcp. Data lives on a
-Longhorn PVC at /data (todos.db, docs mirror + index). k3s tools use the
-in-cluster ServiceAccount (read-only RBAC).
+Longhorn PVC at /data (todos.db, docs mirror + index, tool-index.db). k3s tools
+use the in-cluster ServiceAccount (read-only RBAC).
 """
 
 from __future__ import annotations
@@ -35,6 +49,8 @@ import k3s_tools
 import storage_tools
 import system_checks
 from todos_store import DEFAULT_TTL, TodoError, TodosStore
+from tool_registry import ToolError, ToolRegistry
+from tool_vectors import ToolIndex
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("mcp")
@@ -43,19 +59,25 @@ PORT = int(os.environ.get("PORT", "8650"))
 DB_PATH = Path(os.environ.get("TODOS_DB", "/data/todos.db"))
 store = TodosStore(DB_PATH)
 
+# STATIC_TOOLS=0 turns off the legacy static surface — the client then sees
+# only discover_tool / execute_tool / tool_catalog and must discover the rest.
+STATIC_TOOLS = os.environ.get("STATIC_TOOLS", "1") != "0"
+
 # ---------------------------------------------------------------- MCP app
 # Accessible on the LAN + via Traefik at mcp.ffilt.us (Host header preserved).
 # Allow the ffilt.us wildcard for the ingress host plus LAN IPs for direct hits.
 mcp = FastMCP(
     "mcp",
     instructions=(
-        "Unified homelab agent tools. Prefixes:\n"
-        "  todo_*  — shared task store with leases (create/claim/complete/list)\n"
-        "  docs_*  — full-text search over the homelab-docs repo (search/get/list)\n"
-        "  k3s_*   — read-only Kubernetes cluster queries (services/pods/nodes/...)\n"
-        "  gitea_* — read-only Gitea queries (repos/PRs/issues/actions/files)\n"
-        "  storage_* — host storage via system calls (df/mdadm/smartctl)\n"
-        "  system_*  — opaque health checks (system_check_status / system_list_checks)\n"
+        "Unified homelab agent tools. Dynamic discovery:\n"
+        "  discover_tool(query) — semantic search over the tool catalog;\n"
+        "                        returns names, descriptions, input schemas\n"
+        "  execute_tool(name, payload) — call any discovered tool by name\n"
+        "  tool_catalog() — list every tool (name/family/one-liner)\n"
+        "Workflow: discover_tool('manage pods') -> execute_tool('k3s_list_pods', {...}).\n"
+        "Tool families: todo_* (task store w/ leases), docs_* (homelab-docs FTS5),\n"
+        "k3s_* (read-only cluster queries), gitea_* (read-only Gitea API),\n"
+        "storage_* (host storage via system calls), system_* (opaque health checks).\n"
         "All tools return JSON strings. Prefer k3s_* over raw kubectl, system_* for health."
     ),
     transport_security=TransportSecuritySettings(
@@ -86,8 +108,84 @@ def _ok(data: dict | list) -> str:
     return json.dumps(data)
 
 
+# ------------------------------------------------- dynamic tool plumbing
+registry = ToolRegistry()
+tool_index = ToolIndex(registry)
+
+
+def agent_tool(family: str, always_static: bool = False):
+    """Register a tool in the dynamic registry; expose it in the static MCP
+    tool list when STATIC_TOOLS is on (or always for meta tools)."""
+
+    def deco(fn):
+        registry.register(fn, family=family)
+        if always_static or STATIC_TOOLS:
+            mcp.add_tool(fn)
+        return fn
+
+    return deco
+
+
+# ================================================================ meta_*
+@agent_tool(family="meta", always_static=True)
+def discover_tool(query: str, top_k: int = 5, min_score: float = 0.2) -> str:
+    """Semantic search over the tool catalog (embedding DB). Returns ranked
+    tools with name, family, description and input_schema for queries like
+    'manage pods' or 'gitea pull requests'. Falls back to keyword matching
+    when the embeddings service is unreachable."""
+    try:
+        q = (query or "").strip()
+        if not q:
+            return _ok({"query": query, "error": "query required"})
+        res = tool_index.search(q, top_k=top_k, min_score=min_score)
+        hits = []
+        for r in res["results"]:
+            try:
+                schema = json.loads(r["schema"])
+            except Exception:  # noqa: BLE001
+                schema = {}
+            hits.append(
+                {
+                    "name": r["name"],
+                    "family": r["family"],
+                    "description": r["description"],
+                    "input_schema": schema,
+                    "score": r["score"],
+                }
+            )
+        return _ok({"query": q, "mode": res["mode"], "count": len(hits), "results": hits})
+    except Exception as exc:  # noqa: BLE001
+        return _ok({"query": query, "error": f"{type(exc).__name__}: {exc}"})
+
+
+@agent_tool(family="meta", always_static=True)
+def execute_tool(tool_name: str, payload: dict | None = None) -> str:
+    """Call any registered tool by exact name with a JSON payload (validated
+    against the tool's input schema). Returns {"ok": true, "tool": ...,
+    "result": ...} on success, or {"ok": false, "tool": ..., "error":
+    {"type": ..., "message": ...}} on unknown tool / invalid payload / failure.
+    Discover names + payload shapes with discover_tool()."""
+    try:
+        raw = registry.call(tool_name, payload or {})
+    except ToolError as exc:
+        return _ok({"ok": False, "tool": tool_name, "error": {"type": exc.kind, "message": exc.message}})
+    except Exception as exc:  # noqa: BLE001
+        return _ok({"ok": False, "tool": tool_name, "error": {"type": "tool_error", "message": f"{type(exc).__name__}: {exc}"}})
+    try:
+        result = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        result = raw
+    return _ok({"ok": True, "tool": tool_name, "result": result})
+
+
+@agent_tool(family="meta", always_static=True)
+def tool_catalog() -> str:
+    """List every registered tool: name, family, one-line description (no input schemas)."""
+    return _ok({"count": len(registry.entries()), "tools": registry.catalog()})
+
+
 # ================================================================ todo_*
-@mcp.tool()
+@agent_tool(family="todo")
 def todo_create(title: str, description: str = "", dependencies: list[int] | None = None,
                 priority: str = "normal", ttl_seconds: int | None = None) -> str:
     """Create a todo. Returns the task with its id. dependencies are ids of tasks
@@ -98,7 +196,7 @@ def todo_create(title: str, description: str = "", dependencies: list[int] | Non
         return _ok({"error": e.code, "message": e.message})
 
 
-@mcp.tool()
+@agent_tool(family="todo")
 def todo_list(status: str | None = None, owner: str | None = None) -> str:
     """List todos. status: open|claimed|completed. owner filters by claim owner.
     Expired leases are auto-returned to open first."""
@@ -108,7 +206,7 @@ def todo_list(status: str | None = None, owner: str | None = None) -> str:
         return _ok({"error": e.code, "message": e.message})
 
 
-@mcp.tool()
+@agent_tool(family="todo")
 def todo_get(todo_id: int) -> str:
     """Get a single todo by id."""
     try:
@@ -117,7 +215,7 @@ def todo_get(todo_id: int) -> str:
         return _ok({"error": e.code, "message": e.message})
 
 
-@mcp.tool()
+@agent_tool(family="todo")
 def todo_claim(todo_id: int, owner: str, ttl_seconds: int | None = None) -> str:
     """Atomically claim an open todo for owner. Requires all dependencies completed.
     Returns a lease_token that must be used to complete/release/renew. The lease
@@ -129,7 +227,7 @@ def todo_claim(todo_id: int, owner: str, ttl_seconds: int | None = None) -> str:
         return _ok({"error": e.code, "message": e.message})
 
 
-@mcp.tool()
+@agent_tool(family="todo")
 def todo_complete(todo_id: int, lease_token: str) -> str:
     """Mark a claimed todo completed. Requires the lease_token from todo_claim."""
     try:
@@ -138,7 +236,7 @@ def todo_complete(todo_id: int, lease_token: str) -> str:
         return _ok({"error": e.code, "message": e.message})
 
 
-@mcp.tool()
+@agent_tool(family="todo")
 def todo_release(todo_id: int, lease_token: str) -> str:
     """Give up a lease early (returns the todo to open). Requires lease_token."""
     try:
@@ -147,7 +245,7 @@ def todo_release(todo_id: int, lease_token: str) -> str:
         return _ok({"error": e.code, "message": e.message})
 
 
-@mcp.tool()
+@agent_tool(family="todo")
 def todo_renew(todo_id: int, lease_token: str, ttl_seconds: int | None = None) -> str:
     """Extend a claim's lease. Requires lease_token. Returns the updated task."""
     try:
@@ -156,7 +254,7 @@ def todo_renew(todo_id: int, lease_token: str, ttl_seconds: int | None = None) -
         return _ok({"error": e.code, "message": e.message})
 
 
-@mcp.tool()
+@agent_tool(family="todo")
 def todo_delete(todo_id: int) -> str:
     """Delete a todo. Refuses if other tasks depend on it."""
     try:
@@ -165,247 +263,253 @@ def todo_delete(todo_id: int) -> str:
         return _ok({"error": e.code, "message": e.message})
 
 
-@mcp.tool()
+@agent_tool(family="todo")
 def todo_summary() -> str:
     """Counts by status + total expirations."""
     return _ok(store.summary())
 
 
-@mcp.tool()
+@agent_tool(family="todo")
 def todo_events(todo_id: int | None = None, limit: int = 50) -> str:
     """Audit trail of all actions (created/claimed/renewed/completed/released/expired/deleted)."""
     return _ok(store.events(todo_id=todo_id, limit=limit))
 
 
 # ================================================================ docs_*
-@mcp.tool()
+@agent_tool(family="docs")
 def docs_search(query: str, limit: int = 8, mode: str = "and") -> str:
     """Full-text search over the homelab-docs repo (architecture + ops docs).
     Returns ranked hits with path, title, score, and a snippet around the match."""
     return docs_index.search(query, limit=limit, mode=mode)
 
 
-@mcp.tool()
+@agent_tool(family="docs")
 def docs_get(path: str) -> str:
     """Return the full content of a doc by repo-relative path (e.g. ops/rook-soul.md)."""
     return docs_index.get_doc(path)
 
 
-@mcp.tool()
+@agent_tool(family="docs")
 def docs_list(pattern: str = "") -> str:
     """List all indexed docs. Optional substring pattern on path/title."""
     return docs_index.list_docs(pattern=pattern)
 
 
-@mcp.tool()
+@agent_tool(family="docs")
 def docs_index_status() -> str:
     """Index health: file count, last scans/rebuilds, watcher state, git pull state."""
     return docs_index.index_status()
 
 
-@mcp.tool()
+@agent_tool(family="docs")
 def docs_refresh_index() -> str:
     """Force a full reindex of the docs repo (also picks up a freshly cloned repo dir)."""
     return docs_index.refresh_index()
 
 
 # ================================================================ k3s_*
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_nodes() -> str:
     """List cluster nodes: name, status (Ready), roles, k8s version, internal IP, age."""
     return k3s_tools.nodes()
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_namespaces() -> str:
     """List namespaces with status and age."""
     return k3s_tools.namespaces()
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_list_services(namespace: str | None = None) -> str:
     """List Services (ClusterIP/LoadBalancer etc). namespace=None means all namespaces."""
     return k3s_tools.list_services(namespace=namespace)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_get_service(name: str, namespace: str) -> str:
     """Get one Service by name (namespace required)."""
     return k3s_tools.get_service(name, namespace)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_list_pods(namespace: str | None = None, label_selector: str | None = None) -> str:
     """List Pods. namespace=None means all namespaces. label_selector e.g. 'app=talaria'."""
     return k3s_tools.list_pods(namespace=namespace, label_selector=label_selector)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_get_pod(name: str, namespace: str) -> str:
     """Get one Pod by name (namespace required). Includes container statuses."""
     return k3s_tools.get_pod(name, namespace)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_pod_logs(name: str, namespace: str, tail: int = 100, container: str | None = None) -> str:
     """Tail container logs of a pod. tail = number of lines (default 100)."""
     return k3s_tools.pod_logs(name, namespace, tail=tail, container=container)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_list_deployments(namespace: str | None = None) -> str:
     """List Deployments with desired/ready replicas."""
     return k3s_tools.list_deployments(namespace=namespace)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_get_deployment(name: str, namespace: str) -> str:
     """Get one Deployment by name (namespace required)."""
     return k3s_tools.get_deployment(name, namespace)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_list_statefulsets(namespace: str | None = None) -> str:
     """List StatefulSets with ready replicas."""
     return k3s_tools.list_statefulsets(namespace=namespace)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_list_daemonsets(namespace: str | None = None) -> str:
     """List DaemonSets with ready replicas."""
     return k3s_tools.list_daemonsets(namespace=namespace)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_list_ingressroutes(namespace: str | None = None) -> str:
     """List Traefik IngressRoutes with their Host() match rules (the ffilt.us routing table)."""
     return k3s_tools.list_ingressroutes(namespace=namespace)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_list_pvcs(namespace: str | None = None) -> str:
     """List PersistentVolumeClaims with status, storage class, capacity."""
     return k3s_tools.list_pvcs(namespace=namespace)
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_list_storageclasses() -> str:
     """List StorageClasses (longhorn, nfs-media, local-path, ...)."""
     return k3s_tools.list_storageclasses()
 
 
-@mcp.tool()
+@agent_tool(family="k3s")
 def k3s_list_events(namespace: str | None = None, limit: int = 50) -> str:
     """Recent Events (warnings usually first). limit max 200."""
     return k3s_tools.list_events(namespace=namespace, limit=limit)
 
 
 # ================================================================ gitea_*
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_list_repos(owner: str = "reeds") -> str:
     """List Gitea repos for an owner (default reeds): name, description, private,
     default branch, updated time, issue/star/fork counts."""
     return gitea_tools.list_repos(owner=owner)
 
 
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_get_repo(owner: str, name: str) -> str:
     """Get one Gitea repo (owner/name): clone URLs, size, counts, timestamps."""
     return gitea_tools.get_repo(owner, name)
 
 
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_list_prs(owner: str, repo: str, state: str = "open", limit: int = 20) -> str:
     """List pull requests (state: open|closed|all). Includes mergeable when known."""
     return gitea_tools.list_prs(owner, repo, state=state, limit=limit)
 
 
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_get_pr(owner: str, repo: str, number: int) -> str:
     """Get one pull request by number: full detail incl. mergeability + files changed."""
     return gitea_tools.get_pr(owner, repo, number)
 
 
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_list_issues(owner: str, repo: str, state: str = "open", limit: int = 20) -> str:
     """List issues (state: open|closed|all). Pull requests are excluded (type=issues)."""
     return gitea_tools.list_issues(owner, repo, state=state, limit=limit)
 
 
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_get_issue(owner: str, repo: str, number: int) -> str:
     """Get one issue by number: full detail incl. body + labels + comments count."""
     return gitea_tools.get_issue(owner, repo, number)
 
 
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_list_action_runs(owner: str, repo: str, limit: int = 10) -> str:
     """List Gitea Actions workflow runs for a repo: id, name, status, conclusion, sha."""
     return gitea_tools.list_action_runs(owner, repo, limit=limit)
 
 
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_get_action_run(owner: str, repo: str, run_id: int) -> str:
     """Get one Actions run by id, including its jobs (name, status, conclusion)."""
     return gitea_tools.get_action_run(owner, repo, run_id)
 
 
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_action_run_logs(owner: str, repo: str, run_id: int, job_id: int | None = None) -> str:
     """Fetch Actions run logs (raw text, last ~8k chars per job). If job_id omitted,
     concatenates all jobs of the run."""
     return gitea_tools.action_run_logs(owner, repo, run_id, job_id=job_id)
 
 
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_list_contents(owner: str, repo: str, path: str = "", ref: str = "") -> str:
     """List a directory in a repo (or describe a file). ref = branch/tag/sha."""
     return gitea_tools.list_contents(owner, repo, path=path, ref=ref)
 
 
-@mcp.tool()
+@agent_tool(family="gitea")
 def gitea_get_file(owner: str, repo: str, path: str, ref: str = "") -> str:
     """Get the full content of one file in a repo (decoded). ref = branch/tag/sha."""
     return gitea_tools.get_file(owner, repo, path, ref=ref)
 
 
 # ================================================================ storage_*
-@mcp.tool()
+@agent_tool(family="storage")
 def storage_disk_usage() -> str:
     """df on the host: real filesystems with size/used/avail/pct (system call)."""
     return storage_tools.disk_usage()
 
 
-@mcp.tool()
+@agent_tool(family="storage")
 def storage_raid_status() -> str:
     """mdadm RAID array status from the host (/proc/mdstat + mdadm --detail)."""
     return storage_tools.raid_status()
 
 
-@mcp.tool()
+@agent_tool(family="storage")
 def storage_smart_health() -> str:
     """SMART health per physical disk on the host (smartctl -H; slower — ~seconds/disk)."""
     return storage_tools.smart_health()
 
 
-@mcp.tool()
+@agent_tool(family="storage")
 def storage_disks() -> str:
     """Physical disks on the host from lsblk (name, size, model) — fast, no smartctl."""
     return storage_tools.disks()
 
 
 # ================================================================ system_*
-@mcp.tool()
+@agent_tool(family="system")
 def system_list_checks() -> str:
-    """List available system health checks (lowercase-hyphen ids) with descriptions."""
+    """List available system health checks (lowercase-hyphen ids) with descriptions.
+    Check ids include: router-alive (OPNsense ping), ping-nodes, wan-access
+    (Cloudflare edge download), disk-space, cpu-load, memory-pressure,
+    node-cpu, node-memory."""
     return system_checks.list_checks()
 
 
-@mcp.tool()
+@agent_tool(family="system")
 def system_check_status(checks: list[str] | None = None) -> str:
     """Run opaque system health checks. checks is a list of check ids
     (lowercase-hyphen, see system_list_checks); empty/null runs ALL checks.
-    Each result: {id, status: pass|warn|fail|error, detail, took_ms}."""
+    Each result: {id, status: pass|warn|fail|error, detail, took_ms}.
+    Examples: ['router-alive', 'wan-access', 'disk-space', 'node-cpu'] —
+    wan-access for internet/WAN reachability, router-alive for the OPNsense
+    router, disk-space for host storage."""
     return system_checks.check_status(checks)
 
 
@@ -428,12 +532,18 @@ async def lifespan(_app):
     except Exception as exc:  # noqa: BLE001
         log.warning("docs initial rebuild failed: %s", exc)
     docs_index.start_watchers()
+    # Build the tool embedding index (rebuilds only if empty/stale — a failed
+    # embed just degrades discovery to keyword mode; never blocks startup).
+    try:
+        log.info("tool index: %s", tool_index.ensure_index())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("tool index init failed: %s", exc)
     async with mcp_session_manager.run():
         yield
 
 
 # ---------------------------------------------------------------- REST app
-app = FastAPI(title="mcp — unified agent tools", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="mcp — unified agent tools", version="2.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -479,7 +589,12 @@ def _http(e: TodoError) -> HTTPException:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "mcp", "tools": ["todo_*", "docs_*", "k3s_*", "gitea_*", "storage_*", "system_*"]}
+    return {
+        "status": "ok",
+        "service": "mcp",
+        "tools": ["discover_tool", "execute_tool", "tool_catalog"] + (["todo_*", "docs_*", "k3s_*", "gitea_*", "storage_*", "system_*"] if STATIC_TOOLS else []),
+        "static_tools": STATIC_TOOLS,
+    }
 
 
 @app.get("/")
@@ -487,9 +602,26 @@ def root():
     return {
         "service": "mcp",
         "mcp_endpoint": "/mcp",
+        "dynamic": ["discover_tool", "execute_tool", "tool_catalog"],
+        "static_tools": STATIC_TOOLS,
         "tool_families": ["todo_*", "docs_*", "k3s_*", "gitea_*", "storage_*", "system_*"],
-        "docs": "mcp.ffilt.us — unified agent tools (todo/docs/k3s/gitea/storage/system)",
+        "docs": "mcp.ffilt.us — unified agent tools (dynamic discover/execute)",
     }
+
+
+@app.get("/api/tools")
+def api_tools():
+    return {"count": len(registry.entries()), "tools": registry.catalog()}
+
+
+@app.post("/api/tools/reindex")
+def api_tools_reindex():
+    return tool_index.rebuild()
+
+
+@app.get("/api/tools/status")
+def api_tools_status():
+    return tool_index.status()
 
 
 @app.get("/api/summary")
