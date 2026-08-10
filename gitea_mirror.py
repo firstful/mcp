@@ -191,55 +191,69 @@ class GiteaMirror:
         body += f"\n\n<!-- todo-id: {todo['id']} -->"
         return body
 
+    def _create_issue(self, todo: dict) -> dict:
+        """Create the issue for a todo that has no (valid) mapping yet.
+        Persists the new issue number back into the store."""
+        self.ensure_labels()
+        created = self._request(
+            "POST", f"{self._repo_path()}/issues",
+            {
+                "title": self._title_for(todo),
+                "body": self._body_for(todo),
+                # CreateIssueOption.labels is []int64 (label IDs)
+                "labels": [
+                    self._label_ids[n]
+                    for n in self._labels_for(todo)
+                    if n in self._label_ids
+                ],
+                # completed todos must be born closed
+                "closed": todo.get("status") == "completed",
+            },
+        )
+        num = created.get("number")
+        if not num:
+            raise MirrorError(f"create issue returned no number: {created}")
+        if self.store is not None:
+            try:
+                self.store.set_gitea_issue(todo["id"], num)
+            except Exception:  # noqa: BLE001
+                log.exception("mirror: cannot persist gitea_issue for todo %s", todo["id"])
+        return {"action": "created", "issue": num}
+
     def sync_todo(self, todo: dict) -> dict:
         """Create or update the issue for one todo. Returns
         {"action": created|updated, "issue": <number>}."""
-        self.ensure_labels()
         issue_number = todo.get("gitea_issue")
         if not issue_number:
-            created = self._request(
-                "POST", f"{self._repo_path()}/issues",
-                {
-                    "title": self._title_for(todo),
-                    "body": self._body_for(todo),
-                    # CreateIssueOption.labels is []int64 (label IDs)
-                    "labels": [
-                        self._label_ids[n]
-                        for n in self._labels_for(todo)
-                        if n in self._label_ids
-                    ],
-                    # completed todos must be born closed
-                    "closed": todo.get("status") == "completed",
-                },
+            return self._create_issue(todo)
+        try:
+            patch: dict = {
+                "title": self._title_for(todo),
+                "body": self._body_for(todo),
+                "assignees": self._assignees_for(todo),
+                "state": "closed" if todo.get("status") == "completed" else "open",
+            }
+            if todo.get("status") == "claimed" and todo.get("lease_expires_at"):
+                patch["due_date"] = todo["lease_expires_at"]
+            else:
+                patch["unset_due_date"] = True
+            self._request("PATCH", f"{self._repo_path()}/issues/{issue_number}", patch)
+            # labels are replaced via the dedicated endpoint (not in EditIssueOption)
+            self._request(
+                "PUT", f"{self._repo_path()}/issues/{issue_number}/labels",
+                {"labels": self._labels_for(todo)},
             )
-            num = created.get("number")
-            if not num:
-                raise MirrorError(f"create issue returned no number: {created}")
-            # persist the mapping back into the store (mirror owns this write)
-            if self.store is not None:
-                try:
-                    self.store.set_gitea_issue(todo["id"], num)
-                except Exception:  # noqa: BLE001
-                    log.exception("mirror: cannot persist gitea_issue for todo %s", todo["id"])
-            return {"action": "created", "issue": num}
-
-        patch: dict = {
-            "title": self._title_for(todo),
-            "body": self._body_for(todo),
-            "assignees": self._assignees_for(todo),
-            "state": "closed" if todo.get("status") == "completed" else "open",
-        }
-        if todo.get("status") == "claimed" and todo.get("lease_expires_at"):
-            patch["due_date"] = todo["lease_expires_at"]
-        else:
-            patch["unset_due_date"] = True
-        self._request("PATCH", f"{self._repo_path()}/issues/{issue_number}", patch)
-        # labels are replaced via the dedicated endpoint (not in EditIssueOption)
-        self._request(
-            "PUT", f"{self._repo_path()}/issues/{issue_number}/labels",
-            {"labels": self._labels_for(todo)},
-        )
-        return {"action": "updated", "issue": issue_number}
+            return {"action": "updated", "issue": issue_number}
+        except MirrorError as e:
+            if "404" in str(e):
+                # issue was deleted out from under us (hand edit/cleanup):
+                # SQLite is authoritative — recreate and remap
+                log.warning(
+                    "mirror: issue %s missing for todo %s — recreating",
+                    issue_number, todo["id"],
+                )
+                return self._create_issue(todo)
+            raise
 
     def close_issue(self, todo: dict) -> dict:
         """Archive (close) the issue for a deleted todo. Never deletes."""
