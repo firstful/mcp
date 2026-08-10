@@ -46,11 +46,12 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 import docs_index
+import gitea_mirror
 import gitea_tools
 import k3s_tools
 import storage_tools
 import system_checks
-from todos_store import DEFAULT_TTL, TodoError, TodosStore
+from todos_store import DEFAULT_TTL, TodoError, TodosStore, set_mirror_hook
 from tool_registry import ToolError, ToolRegistry
 from tool_vectors import ToolIndex
 
@@ -60,6 +61,14 @@ log = logging.getLogger("mcp")
 PORT = int(os.environ.get("PORT", "8650"))
 DB_PATH = Path(os.environ.get("TODOS_DB", "/data/todos.db"))
 store = TodosStore(DB_PATH)
+
+# Gitea issue mirror (write-through, best-effort). Enabled only when
+# GITEA_MIRROR_TOKEN is set; SQLite stays authoritative either way. A full
+# reconcile runs in the background at startup to backfill/repair the board.
+_mirror = gitea_mirror.setup(store)
+if _mirror is not None:
+    set_mirror_hook(gitea_mirror.hook)
+    gitea_mirror.start_background_reconcile(store)
 
 # Dynamic-only default (fail-forward 2026-08-10): the client sees only the
 # meta tools below and must discover_tool/execute_tool the rest. STATIC_TOOLS=1
@@ -276,6 +285,24 @@ def todo_summary() -> str:
 def todo_events(todo_id: int | None = None, limit: int = 50) -> str:
     """Audit trail of all actions (created/claimed/renewed/completed/released/expired/deleted)."""
     return _ok(store.events(todo_id=todo_id, limit=limit))
+
+
+@agent_tool(family="todo")
+def todo_mirror_status() -> str:
+    """Gitea mirror status: enabled, target repo, label readiness, last reconcile."""
+    return _ok(gitea_mirror.status())
+
+
+@agent_tool(family="todo")
+def todo_mirror_reconcile() -> str:
+    """Force a full reconcile sweep against Gitea: create missing issues, fix
+    drift (labels/assignee/state/due date). Returns created/updated counts."""
+    if gitea_mirror.mirror is None:
+        return _ok({"error": "mirror_disabled", "message": "GITEA_MIRROR_TOKEN not set"})
+    try:
+        return _ok(gitea_mirror.mirror.reconcile(store.list()))
+    except TodoError as e:
+        return _ok({"error": e.code, "message": e.message})
 
 
 # ================================================================ docs_*

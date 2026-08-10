@@ -13,17 +13,32 @@ Semantics:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+log = logging.getLogger("todos-store")
+
 DB_PATH = Path(os.environ.get("TODOS_DB", "/data/todos.db"))
 
 VALID_STATUS = {"open", "claimed", "completed"}
 VALID_PRIORITY = {"low", "normal", "high", "urgent"}
 DEFAULT_TTL = 3600  # 1h default lease
+
+# Optional mirror hook: callable(action: str, todo: dict) -> None, installed by
+# server.py via set_mirror_hook(). The store treats it as best-effort — it is
+# invoked AFTER commit and must never raise into the store (exceptions are
+# caught and logged here).
+mirror_hook = None
+
+
+def set_mirror_hook(fn) -> None:
+    """Install the write-through mirror callback (e.g. gitea_mirror.hook)."""
+    global mirror_hook
+    mirror_hook = fn
 
 
 def _now() -> str:
@@ -96,9 +111,23 @@ class TodosStore:
                 CREATE INDEX IF NOT EXISTS idx_events_todo ON events(todo_id);
                 """
             )
+            # migration: gitea_issue (mirror mapping, nullable) — added 2026-08-10
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(todos)")]
+            if "gitea_issue" not in cols:
+                conn.execute("ALTER TABLE todos ADD COLUMN gitea_issue INTEGER")
+                log.info("todos: migrated schema (added gitea_issue column)")
             conn.commit()
         finally:
             conn.close()
+
+    def _notify(self, action: str, todo: dict) -> None:
+        """Fire the mirror hook after a committed mutation. Never raises."""
+        if mirror_hook is None:
+            return
+        try:
+            mirror_hook(action, todo)
+        except Exception:  # noqa: BLE001
+            log.exception("mirror hook failed for %s todo %s", action, todo.get("id"))
 
     def _row_to_dict(self, row: sqlite3.Row, include_token: bool = False) -> dict:
         deps = _parse_deps(row["deps"])
@@ -128,6 +157,7 @@ class TodosStore:
             "expired_count": row["expired_count"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "gitea_issue": row["gitea_issue"],
             "ready": ready,
             "blocked_by": blocking,
             "expired": row["status"] == "open" and row["expired_count"] > 0,
@@ -156,6 +186,12 @@ class TodosStore:
             )
         if rows:
             conn.commit()
+            for r in rows:
+                fresh = conn.execute(
+                    "SELECT * FROM todos WHERE id=?", (r["id"],)
+                ).fetchone()
+                if fresh is not None:
+                    self._notify("expired", self._row_to_dict(fresh))
         return len(rows)
 
     def _validate_deps(self, conn: sqlite3.Connection, deps: list[int], todo_id: int | None) -> None:
@@ -178,6 +214,18 @@ class TodosStore:
                 stack.extend(_parse_deps(r["deps"]))
 
     # ------------------------------------------------------------- writes
+    def set_gitea_issue(self, todo_id: int, issue_number: int) -> None:
+        """Persist the mirror's issue number for a todo (mirror-owned write)."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                "UPDATE todos SET gitea_issue=?, updated_at=? WHERE id=?",
+                (int(issue_number), _now(), todo_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def create(self, title: str, description: str = "", dependencies: list[int] | None = None,
                priority: str = "normal", ttl_seconds: int = DEFAULT_TTL) -> dict:
         if not title or not title.strip():
@@ -204,6 +252,10 @@ class TodosStore:
                 (todo_id, now, "created", None, title.strip()),
             )
             conn.commit()
+            d = self.get(todo_id)
+            self._notify("created", d)
+            # re-read so the returned dict carries gitea_issue if the mirror
+            # created one during the notify
             return self.get(todo_id)
         finally:
             conn.close()
@@ -244,7 +296,9 @@ class TodosStore:
             )
             conn.commit()
             fresh = conn.execute("SELECT * FROM todos WHERE id=?", (todo_id,)).fetchone()
-            return self._row_to_dict(fresh, include_token=True) | {"lease_token": token}
+            d = self._row_to_dict(fresh) | {"lease_token": token}
+            self._notify("claimed", {k: v for k, v in d.items() if k != "lease_token"})
+            return d
         finally:
             conn.close()
 
@@ -278,7 +332,9 @@ class TodosStore:
                 (todo_id, now, "completed", row["owner"], "completed"),
             )
             conn.commit()
-            return self.get(todo_id)
+            d = self.get(todo_id)
+            self._notify("completed", d)
+            return d
         finally:
             conn.close()
 
@@ -304,7 +360,9 @@ class TodosStore:
                 (todo_id, now, "released", row["owner"], "released early"),
             )
             conn.commit()
-            return self.get(todo_id)
+            d = self.get(todo_id)
+            self._notify("released", d)
+            return d
         finally:
             conn.close()
 
@@ -334,7 +392,9 @@ class TodosStore:
                 (todo_id, now, "renewed", row["owner"], f"ttl={ttl}s expires={expires}"),
             )
             conn.commit()
-            return self.get(todo_id)
+            d = self.get(todo_id)
+            self._notify("renewed", d)
+            return d
         finally:
             conn.close()
 
@@ -343,7 +403,7 @@ class TodosStore:
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT id FROM todos WHERE id=?", (todo_id,)).fetchone()
+            row = conn.execute("SELECT id, title, gitea_issue FROM todos WHERE id=?", (todo_id,)).fetchone()
             if row is None:
                 raise TodoError("not_found", f"task {todo_id} not found")
             # refuse if other tasks depend on it (proper JSON-aware check)
@@ -362,6 +422,7 @@ class TodosStore:
             conn.execute("INSERT INTO events(todo_id,ts,action,actor,detail) VALUES(?,?,?,?,?)",
                          (todo_id, now, "deleted", None, "deleted"))
             conn.commit()
+            self._notify("deleted", {"id": todo_id, "title": row["title"], "gitea_issue": row["gitea_issue"]})
             return {"ok": True, "id": todo_id}
         finally:
             conn.close()

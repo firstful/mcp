@@ -22,7 +22,7 @@ Tool families (all return JSON strings):
 
 | Prefix  | Tools | Purpose |
 |---------|-------|---------|
-| `todo_*`  | create, list, get, claim, complete, release, renew, delete, summary, events | Shared task store with leases/TTL (SQLite, Longhorn PVC) |
+| `todo_*`  | create, list, get, claim, complete, release, renew, delete, summary, events, mirror_status, mirror_reconcile | Shared task store with leases/TTL (SQLite, Longhorn PVC) + optional best-effort Gitea issue mirror |
 | `docs_*`  | search, get, list, index_status, refresh_index | FTS5 full-text search over `reeds/homelab-docs` mirror |
 | `k3s_*`   | nodes, namespaces, list/get services, pods, logs, deployments, statefulsets, daemonsets, ingressroutes, pvcs, storageclasses, events | Read-only Kubernetes cluster queries (in-cluster SA RBAC) |
 | `gitea_*` | repos, PRs, issues, actions runs/jobs/logs, contents, files | Read-only Gitea API |
@@ -54,6 +54,24 @@ export TODOS_DB=/tmp/mcp-todos.db DOCS_REPO_DIR=/srv/homelab-docs-mirror DOCS_IN
 - `EMBEDDINGS_URL` (default `http://embeddings.embeddings.svc.cluster.local`) — homelab embeddings service
 - `EMBED_TIMEOUT` (default `10`) — HTTP timeout for embed calls
 - `STATIC_TOOLS` (`1` default) — `0` disables the legacy static tool surface
+
+## Gitea todo mirror (1.4.0)
+
+Each todo is mirrored to exactly one issue in a dedicated Gitea repo
+(default `reeds/homelab-todos`). SQLite stays authoritative; the mirror is
+best-effort write-through (never blocks a todo op) plus a reconcile sweep
+that runs at startup and on demand via `todo_mirror_reconcile`.
+
+Mapping: `status:open|claimed|completed` + `priority:*` labels, assignee =
+claim owner (only when the owner is a real Gitea user), due date = lease
+expiry (informational; Gitea due dates are date-granular). Deleted todos
+close their issue (never delete). Lease tokens are never mirrored.
+
+Env (all optional — no token = mirror disabled):
+- `GITEA_MIRROR_URL` (default `http://192.168.1.2:3000`)
+- `GITEA_MIRROR_TOKEN` — Secret `mcp-gitea-mirror-token`; scopes
+  `read:user,write:issue,write:repository`
+- `GITEA_MIRROR_OWNER` / `GITEA_MIRROR_REPO` (defaults `reeds` / `homelab-todos`)
 
 ## Deploy
 
