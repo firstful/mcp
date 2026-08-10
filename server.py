@@ -19,9 +19,11 @@ Dynamic tool surface (the point of this refactor):
     discovered schema and dispatch to the registered callable.
   - tool_catalog()                       — cheap enumeration (no schemas).
 
-The legacy static surface (all 47 todo_*/docs_*/k3s_*/gitea_*/storage_*/system_*
-tools) stays registered while STATIC_TOOLS != "0" — both paths draw from the
-same ToolRegistry, so they can't drift.
+Dynamic-only is the DEFAULT (STATIC_TOOLS unset = "0"): the client sees just
+discover_tool / execute_tool / tool_catalog and discovers everything else on
+demand. Set STATIC_TOOLS=1 to re-register the legacy 47-tool surface
+(rollback/back-compat) — both paths draw from the same ToolRegistry, so they
+can't drift.
 
 Runs in k3s (ns `mcp`), exposed at http://mcp.ffilt.us/mcp. Data lives on a
 Longhorn PVC at /data (todos.db, docs mirror + index, tool-index.db). k3s tools
@@ -59,9 +61,10 @@ PORT = int(os.environ.get("PORT", "8650"))
 DB_PATH = Path(os.environ.get("TODOS_DB", "/data/todos.db"))
 store = TodosStore(DB_PATH)
 
-# STATIC_TOOLS=0 turns off the legacy static surface — the client then sees
-# only discover_tool / execute_tool / tool_catalog and must discover the rest.
-STATIC_TOOLS = os.environ.get("STATIC_TOOLS", "1") != "0"
+# Dynamic-only default (fail-forward 2026-08-10): the client sees only the
+# meta tools below and must discover_tool/execute_tool the rest. STATIC_TOOLS=1
+# re-registers the legacy 47-tool static surface for rollback/back-compat.
+STATIC_TOOLS = os.environ.get("STATIC_TOOLS", "0") != "0"
 
 # ---------------------------------------------------------------- MCP app
 # Accessible on the LAN + via Traefik at mcp.ffilt.us (Host header preserved).

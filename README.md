@@ -3,7 +3,7 @@
 Single MCP StreamableHTTP server for agents, hosted on the k3s cluster at
 `http://mcp.ffilt.us/mcp`.
 
-## Dynamic tool surface (since 1.2.0)
+## Dynamic tool surface (default since 1.3.0)
 
 The MCP tool list is discoverable instead of fixed. Three meta tools are
 always registered; the other 47 are found via semantic search over a tiny
@@ -29,10 +29,10 @@ Tool families (all return JSON strings):
 | `storage_*` | disk_usage, raid_status, smart_health, disks | Host storage via system calls |
 | `system_*` | list_checks, check_status | Opaque health checks |
 
-The legacy static surface stays registered while `STATIC_TOOLS != "0"`.
-Set `STATIC_TOOLS=0` for dynamic-only (client sees just the 3 meta tools).
-Both surfaces draw from the same registry (`tool_registry.py`), so the
-embedding index and the tool list can never drift.
+Dynamic-only is the default (STATIC_TOOLS unset = "0"); set `STATIC_TOOLS=1`
+to re-register the legacy static surface for rollback/back-compat. Both
+surfaces draw from the same registry (`tool_registry.py`), so the embedding
+index and the tool list can never drift.
 
 ## Run locally (dev)
 
