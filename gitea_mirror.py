@@ -208,6 +208,8 @@ class GiteaMirror:
                         for n in self._labels_for(todo)
                         if n in self._label_ids
                     ],
+                    # completed todos must be born closed
+                    "closed": todo.get("status") == "completed",
                 },
             )
             num = created.get("number")
