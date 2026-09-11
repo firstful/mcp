@@ -75,7 +75,9 @@ def _log_msg(direction: str, peer: str, sync: bool, message: str, status: str, d
 
 
 def _bootstrap() -> None:
-    """Seed peers from env: A2A_PEERS='["rook","boris"]' + A2A_BASE_URL + A2A_API_KEY."""
+    """Seed peers from env: A2A_PEERS='["rook","boris"]' + A2A_BASE_URL + A2A_API_KEY.
+    The first name in the list is treated as the gateway's default profile (plain
+    base URL); every other name is multiplexed as <base>/p/<name>."""
     raw = os.environ.get("A2A_PEERS", "").strip()
     base = os.environ.get("A2A_BASE_URL", "").strip()
     key = os.environ.get("A2A_API_KEY", "").strip()
@@ -86,14 +88,16 @@ def _bootstrap() -> None:
     except Exception:  # noqa: BLE001
         log.warning("bad A2A_PEERS env: %r", raw)
         return
+    base = base.rstrip("/")
     with _db() as conn:
-        for name in names:
+        for i, name in enumerate(names):
             if not isinstance(name, str) or not name.strip():
                 continue
+            url = base if i == 0 else f"{base}/p/{name.strip().lower()}"
             conn.execute(
                 "INSERT INTO a2a_peers (name, api_url, api_key, updated_at) VALUES (?,?,?,datetime('now')) "
                 "ON CONFLICT(name) DO UPDATE SET api_url=excluded.api_url, api_key=excluded.api_key",
-                (name.strip().lower(), base.rstrip("/"), key))
+                (name.strip().lower(), url, key))
 
 
 def _get_peer(name: str):
