@@ -140,21 +140,30 @@ def a2a_peers() -> str:
     return json.dumps({"count": len(rows), "peers": rows}, indent=1)
 
 
-def a2a_register(name: str, api_url: str, api_key: str = "", capabilities: str = "") -> str:
+def _default_key() -> str:
+    """Server-side fallback key (same secret the gateway api_server validates)."""
+    return os.environ.get("A2A_API_KEY", "").strip()
+
+
+def a2a_register(name: str, api_url: str, api_key: str | None = None, capabilities: str = "") -> str:
     """Add or update an A2A peer. api_url = the peer's Hermes api_server base
     (e.g. http://192.168.1.2:8642 or http://192.168.1.2:8642/p/boris for a
-    multiplexed profile). api_key = Bearer token if the peer requires one."""
+    multiplexed profile). api_key = Bearer token; if omitted/empty, defaults
+    to the server's own A2A_API_KEY (all peers on a gateway share it). Pass an
+    explicit key ONLY for peers on a different gateway with a distinct secret."""
     if not name.strip() or not api_url.strip():
         return json.dumps({"error": "name and api_url required"})
+    stored_key = (api_key or "").strip() or _default_key()
     with _db() as conn:
         conn.execute(
             "INSERT INTO a2a_peers (name, api_url, api_key, capabilities, updated_at) "
             "VALUES (?,?,?,?,datetime('now')) "
             "ON CONFLICT(name) DO UPDATE SET api_url=excluded.api_url, api_key=excluded.api_key, "
             "capabilities=excluded.capabilities, updated_at=excluded.updated_at",
-            (name.strip().lower(), api_url.strip().rstrip("/"), api_key.strip(), capabilities.strip()))
+            (name.strip().lower(), api_url.strip().rstrip("/"), stored_key, capabilities.strip()))
     return json.dumps({"ok": True, "peer": name.strip().lower(), "api_url": api_url.strip().rstrip("/"),
-                       "capabilities": capabilities.strip()})
+                       "capabilities": capabilities.strip(),
+                       "api_key": "default(A2A_API_KEY)" if not (api_key or "").strip() else "explicit"})
 
 
 def a2a_comms(peer: str, message: str, sync: bool = False, timeout: int | None = None) -> str:
