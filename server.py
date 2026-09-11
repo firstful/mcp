@@ -627,6 +627,47 @@ async def lifespan(_app):
 # ---------------------------------------------------------------- REST app
 app = FastAPI(title="mcp — unified agent tools", version="2.1.1", lifespan=lifespan)
 
+# ------------------------------------------------------------------ auth
+# Reed 2026-09-11: agent runtimes on sutliffserver (the deploy host) call the
+# MCP keyless — authorization is determined by source IP. Everything else
+# (LAN, tunnel) must present the Bearer key. Behind Traefik the pod sees the
+# svclb NAT address (10.42.0.1), so trusted-source identity only holds for
+# HOST-DIRECT connections — clients on the box target the pinned ClusterIP.
+import ipaddress
+from starlette.responses import JSONResponse
+
+MCP_API_KEY = os.environ.get("MCP_API_KEY", "").strip()
+_TRUSTED = [
+    ipaddress.ip_network(c.strip())
+    for c in os.environ.get("MCP_TRUSTED_CIDRS", "127.0.0.1/32,::1/128,192.168.1.2/32").split(",")
+    if c.strip()
+]
+
+
+def _client_is_trusted(request) -> bool:
+    try:
+        addr = ipaddress.ip_address(request.client.host)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return any(addr in net for net in _TRUSTED)
+
+
+# NOTE: added BEFORE CORSMiddleware so CORS stays outermost and answers
+# preflights without a key.
+@app.middleware("http")
+async def key_guard(request, call_next):
+    if MCP_API_KEY and request.url.path != "/health":
+        if not _client_is_trusted(request):
+            supplied = request.headers.get("authorization", "")
+            if supplied != f"Bearer {MCP_API_KEY}":
+                return JSONResponse(
+                    {"error": {"message": "unauthorized (trusted-source or Bearer key required)",
+                               "type": "invalid_api_key", "code": "invalid_api_key"}},
+                    status_code=401)
+    response = await call_next(request)
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
