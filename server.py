@@ -46,6 +46,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 import a2a
+import browser_tools
 import docs_index
 import gitea_mirror
 import gitea_tools
@@ -90,7 +91,8 @@ mcp = FastMCP(
         "Workflow: discover_tool('manage pods') -> execute_tool('k3s_list_pods', {...}).\n"
         "Tool families: todo_* (task store w/ leases), docs_* (homelab-docs FTS5),\n"
         "k3s_* (read-only cluster queries), gitea_* (read-only Gitea API),\n"
-        "storage_* (host storage via system calls), system_* (opaque health checks).\n"
+        "storage_* (host storage via system calls), system_* (opaque health checks),\n"
+        "browser_* (CDP browser session handoff — list/create/screenshot/interact/close).\n"
         "All tools return JSON strings. Prefer k3s_* over raw kubectl, system_* for health."
     ),
     transport_security=TransportSecuritySettings(
@@ -595,6 +597,69 @@ def system_check_status(checks: list[str] | None = None) -> str:
     return system_checks.check_status(checks)
 
 
+# ================================================================ browser_*
+@agent_tool(family="browser")
+def browser_session_list() -> str:
+    """List active Rayobrowse browser sessions: session IDs, status, VNC URLs,
+    current page URL/title. Use these session IDs with the other browser tools."""
+    return browser_tools.list_sessions()
+
+
+@agent_tool(family="browser")
+def browser_session_create(os_type: str = "windows", headless: bool = True,
+                            vnc: bool = True, url: str = "") -> str:
+    """Create a new Rayobrowse browser session via CDP. Returns session ID,
+    CDP WebSocket URL, and VNC URL (for human viewing). os_type: windows|linux.
+    Optionally pass a url to navigate to on creation."""
+    return browser_tools.create_session(os_type=os_type, headless=headless,
+                                        vnc=vnc, url=url)
+
+
+@agent_tool(family="browser")
+def browser_session_screenshot(session_id: str) -> str:
+    """Capture a screenshot of the browser session via CDP. Returns base64-encoded
+    PNG image data. Use this to see the current state of the browser."""
+    return browser_tools.take_screenshot(session_id)
+
+
+@agent_tool(family="browser")
+def browser_session_navigate(session_id: str, url: str) -> str:
+    """Navigate the browser session to a URL via CDP. Handles cert bypass for
+    self-signed sites (OPNsense, etc). Returns the current URL and title after
+    navigation."""
+    return browser_tools.navigate(session_id, url)
+
+
+@agent_tool(family="browser")
+def browser_session_interact(session_id: str, action: str,
+                              x: int = 0, y: int = 0,
+                              text: str = "", key: str = "", code: str = "",
+                              delta_x: int = 0, delta_y: int = 0) -> str:
+    """Send input events to the browser session via CDP. Actions:
+    click (x,y), type (text), key (key,code), scroll (x,y,delta_x,delta_y),
+    hover (x,y). Use this for automated browser interaction — form filling,
+    button clicking, scrolling."""
+    kwargs: dict = {}
+    if action == "click":
+        kwargs = {"x": x, "y": y}
+    elif action == "type":
+        kwargs = {"text": text}
+    elif action == "key":
+        kwargs = {"key": key, "code": code}
+    elif action == "scroll":
+        kwargs = {"x": x, "y": y, "delta_x": delta_x, "delta_y": delta_y}
+    elif action == "hover":
+        kwargs = {"x": x, "y": y}
+    return browser_tools.interact(session_id, action, **kwargs)
+
+
+@agent_tool(family="browser")
+def browser_session_close(session_id: str) -> str:
+    """Close a Rayobrowse browser session. Frees the browser instance and
+    releases resources."""
+    return browser_tools.close_session(session_id)
+
+
 # The MCP Starlette app serves its own streamable_http_path (/mcp by default)
 # and needs its session-manager task group started via lifespan. Starlette's
 # Mount does NOT propagate sub-app lifespans, so we run the manager from
@@ -715,7 +780,7 @@ def health():
     return {
         "status": "ok",
         "service": "mcp",
-        "tools": ["discover_tool", "execute_tool", "tool_catalog"] + (["todo_*", "docs_*", "k3s_*", "gitea_*", "storage_*", "system_*"] if STATIC_TOOLS else []),
+        "tools": ["discover_tool", "execute_tool", "tool_catalog"] + (["todo_*", "docs_*", "k3s_*", "gitea_*", "storage_*", "system_*", "browser_*"] if STATIC_TOOLS else []),
         "static_tools": STATIC_TOOLS,
     }
 
@@ -727,7 +792,7 @@ def root():
         "mcp_endpoint": "/mcp",
         "dynamic": ["discover_tool", "execute_tool", "tool_catalog"],
         "static_tools": STATIC_TOOLS,
-        "tool_families": ["todo_*", "docs_*", "k3s_*", "gitea_*", "storage_*", "system_*"],
+        "tool_families": ["todo_*", "docs_*", "k3s_*", "gitea_*", "storage_*", "system_*", "browser_*"],
         "docs": "mcp.ffilt.us — unified agent tools (dynamic discover/execute)",
     }
 

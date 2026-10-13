@@ -4,3 +4,4 @@ mcp==1.26.0
 fastapi>=0.110
 uvicorn>=0.29
 kubernetes>=28.0
+websockets>=12.0
