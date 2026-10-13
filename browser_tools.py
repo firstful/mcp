@@ -447,11 +447,9 @@ async def _cdp_navigate(ws_url: str, url: str) -> dict:
         # Navigate
         result = await session.send("Page.navigate", {"url": url},
                                     session_id=page_session, timeout=20)
-        # Wait for page to load
-        try:
-            await session.wait_for_event("Page.loadEventFired", timeout=15)
-        except TimeoutError:
-            pass  # Some pages never fire loadEventFired (SPA, redirects)
+        # Wait for page to load (sleep instead of wait_for_event to avoid
+        # websocket recv conflict with the _listen background task)
+        await asyncio.sleep(5)
         # Get current URL and title
         try:
             eval_result = await session.send("Runtime.evaluate", {
