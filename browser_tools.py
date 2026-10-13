@@ -155,12 +155,17 @@ class CDPSession:
 # Rayobrowse HTTP API helpers
 
 
-def _http_get(url: str, timeout: int = 10) -> dict:
-    """HTTP GET with timeout, returns parsed JSON."""
+def _http_get(url: str, timeout: int = 10) -> dict | str:
+    """HTTP GET with timeout. Returns parsed JSON dict, or raw string if not JSON."""
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8", "replace")
-        return json.loads(body) if body.strip() else {}
+        if not body.strip():
+            return {}
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError:
+            return body.strip()
 
 
 def _http_post(url: str, data: dict | None = None, timeout: int = 10) -> dict:
@@ -190,22 +195,28 @@ def list_sessions() -> str:
     """List active Rayobrowse browser sessions with status and metadata."""
     try:
         data = _http_get(f"{RAYOBROWSE_API}/browsers", timeout=10)
+        # API returns {"success": true, "data": {"browsers": [...]}}
+        if isinstance(data, dict):
+            browsers = data.get("data", {}).get("browsers", [])
+            if not browsers and "browsers" in data:
+                browsers = data["browsers"]
+        else:
+            browsers = []
         sessions = []
-        for key, info in data.items():
+        for info in browsers:
             if not isinstance(info, dict):
                 continue
-            session_id = info.get("id") or key
-            ws_url = info.get("webSocketDebuggerUrl", "")
-            vnc_url = ""
-            if info.get("vncToken"):
-                vnc_url = f"https://vnc.ffilt.us/sid?token={info['vncToken']}"
+            session_id = info.get("browser_id", info.get("id", ""))
+            ws_url = info.get("ws_endpoint", info.get("webSocketDebuggerUrl", ""))
+            vnc_token = info.get("vncToken", info.get("vnc_token", ""))
+            vnc_url = f"https://vnc.ffilt.us/sid?token={vnc_token}" if vnc_token else ""
             sessions.append({
                 "session_id": session_id,
                 "status": info.get("status", "unknown"),
-                "vnc_token": info.get("vncToken", ""),
+                "vnc_token": vnc_token,
                 "vnc_url": vnc_url,
                 "cdp_ws": ws_url,
-                "created": info.get("createdAt", info.get("created", "")),
+                "created": info.get("created_at", info.get("createdAt", "")),
                 "current_url": info.get("currentUrl", info.get("url", "")),
                 "title": info.get("title", ""),
             })
@@ -234,14 +245,21 @@ def create_session(os_type: str = "windows", headless: bool = True,
         api_url = f"{RAYOBROWSE_API}/connect?{qs}"
         data = _http_get(api_url, timeout=30)
 
-        session_id = data.get("id") or data.get("sessionId") or data.get("token", "")
-        cdp_ws = data.get("webSocketDebuggerUrl", data.get("wsUrl", ""))
-        vnc_token = data.get("vncToken", data.get("token", ""))
-        vnc_url = f"https://vnc.ffilt.us/sid?token={vnc_token}" if vnc_token else ""
+        # API returns plain text CDP WebSocket URL: ws://host:port/cdp/br_xxx
+        if isinstance(data, str) and data.startswith("ws"):
+            cdp_ws = data
+            session_id = cdp_ws.split("/cdp/")[-1] if "/cdp/" in cdp_ws else ""
+            vnc_token = session_id  # VNC token = session ID
+        elif isinstance(data, dict):
+            session_id = data.get("id") or data.get("sessionId") or data.get("token", "")
+            cdp_ws = data.get("webSocketDebuggerUrl", data.get("wsUrl", ""))
+            vnc_token = data.get("vncToken", data.get("token", ""))
+            if not cdp_ws and session_id:
+                cdp_ws = f"{CDP_PROXY}/{session_id}"
+        else:
+            return json.dumps({"error": f"Unexpected API response: {data}"})
 
-        # If the API doesn't return a direct CDP URL, construct one via proxy
-        if not cdp_ws and session_id:
-            cdp_ws = f"{CDP_PROXY}/{session_id}"
+        vnc_url = f"https://vnc.ffilt.us/sid?token={vnc_token}" if vnc_token else ""
 
         result = {
             "session_id": session_id,
@@ -271,12 +289,19 @@ def _resolve_session_ws(session_id: str) -> str:
     # Try to look it up from the Rayobrowse API
     try:
         data = _http_get(f"{RAYOBROWSE_API}/browsers", timeout=10)
-        for key, info in data.items():
+        # API returns {"success": true, "data": {"browsers": [...]}}
+        if isinstance(data, dict):
+            browsers = data.get("data", {}).get("browsers", [])
+            if not browsers and "browsers" in data:
+                browsers = data["browsers"]
+        else:
+            browsers = []
+        for info in browsers:
             if not isinstance(info, dict):
                 continue
-            sid = info.get("id") or key
+            sid = info.get("browser_id", info.get("id", ""))
             if sid == session_id:
-                ws_url = info.get("webSocketDebuggerUrl", "")
+                ws_url = info.get("ws_endpoint", info.get("webSocketDebuggerUrl", ""))
                 if ws_url:
                     _session_cache[session_id] = {"cdp_ws": ws_url, "created": time.time()}
                     return ws_url
