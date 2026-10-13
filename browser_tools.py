@@ -117,12 +117,15 @@ class CDPSession:
                     fut.set_exception(exc)
             self._pending.clear()
 
-    async def send(self, method: str, params: dict | None = None, timeout: float = SESSION_TIMEOUT) -> dict:
+    async def send(self, method: str, params: dict | None = None,
+                   session_id: str = "", timeout: float = SESSION_TIMEOUT) -> dict:
         self._msg_id += 1
         msg_id = self._msg_id
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[msg_id] = fut
         payload = {"id": msg_id, "method": method, "params": params or {}}
+        if session_id:
+            payload["sessionId"] = session_id
         await self.ws.send(json.dumps(payload))
         result = await asyncio.wait_for(fut, timeout=timeout)
         if "error" in result:
@@ -369,21 +372,31 @@ def take_screenshot(session_id: str) -> str:
 
 
 async def _cdp_screenshot(ws_url: str) -> dict:
-    """Take a CDP screenshot."""
+    """Take a CDP screenshot via page target."""
     session = CDPSession(ws_url)
     try:
         await session.connect(timeout=15)
-        # Enable Page domain
-        await session.send("Page.enable")
-        # Ignore certificate errors
-        await session.send("Security.setIgnoreCertificateErrors", {"ignore": True})
-        # Wait a bit for any pending renders
+        # Browser-level endpoint needs to attach to a page target first
+        targets = await session.send("Target.getTargets")
+        page_targets = [t for t in targets.get("targetInfos", [])
+                       if t.get("type") == "page"]
+        if not page_targets:
+            return {"error": "No page targets found"}
+        target_id = page_targets[0]["targetId"]
+        attach_result = await session.send("Target.attachToTarget", {
+            "targetId": target_id, "flatten": True
+        })
+        page_session = attach_result.get("sessionId", "")
+        if not page_session:
+            return {"error": "Failed to attach to page target"}
+        # Now send page-level commands with sessionId
+        await session.send("Page.enable", session_id=page_session)
+        await session.send("Security.setIgnoreCertificateErrors",
+                          {"ignore": True}, session_id=page_session)
         await asyncio.sleep(0.5)
-        # Capture screenshot
         result = await session.send("Page.captureScreenshot", {
             "format": "png",
-            "quality": 80,
-        }, timeout=20)
+        }, session_id=page_session, timeout=20)
         img_data = result.get("data", "")
         return {
             "screenshot": img_data,
@@ -410,25 +423,40 @@ def navigate(session_id: str, url: str) -> str:
 
 
 async def _cdp_navigate(ws_url: str, url: str) -> dict:
-    """Navigate via CDP."""
+    """Navigate via CDP page target."""
     session = CDPSession(ws_url)
     try:
         await session.connect(timeout=15)
+        # Attach to page target
+        targets = await session.send("Target.getTargets")
+        page_targets = [t for t in targets.get("targetInfos", [])
+                       if t.get("type") == "page"]
+        if not page_targets:
+            return {"error": "No page targets found"}
+        target_id = page_targets[0]["targetId"]
+        attach_result = await session.send("Target.attachToTarget", {
+            "targetId": target_id, "flatten": True
+        })
+        page_session = attach_result.get("sessionId", "")
+        if not page_session:
+            return {"error": "Failed to attach to page target"}
         # Enable required domains
-        await session.send("Page.enable")
-        await session.send("Security.setIgnoreCertificateErrors", {"ignore": True})
+        await session.send("Page.enable", session_id=page_session)
+        await session.send("Security.setIgnoreCertificateErrors",
+                          {"ignore": True}, session_id=page_session)
         # Navigate
-        result = await session.send("Page.navigate", {"url": url}, timeout=20)
+        result = await session.send("Page.navigate", {"url": url},
+                                    session_id=page_session, timeout=20)
         # Wait for page to load
         try:
-            await session.wait_forEvent("Page.loadEventFired", timeout=15)
+            await session.wait_for_event("Page.loadEventFired", timeout=15)
         except TimeoutError:
             pass  # Some pages never fire loadEventFired (SPA, redirects)
         # Get current URL and title
         try:
             eval_result = await session.send("Runtime.evaluate", {
                 "expression": "JSON.stringify({url: window.location.href, title: document.title})"
-            }, timeout=5)
+            }, session_id=page_session, timeout=5)
             page_info = json.loads(eval_result.get("result", {}).get("value", "{}"))
         except Exception:
             page_info = {}
@@ -467,11 +495,24 @@ def interact(session_id: str, action: str, **kwargs) -> str:
 
 
 async def _cdp_interact(ws_url: str, action: str, **kwargs) -> dict:
-    """Dispatch input events via CDP."""
+    """Dispatch input events via CDP page target."""
     session = CDPSession(ws_url)
     try:
         await session.connect(timeout=15)
-        await session.send("Page.enable")
+        # Attach to page target
+        targets = await session.send("Target.getTargets")
+        page_targets = [t for t in targets.get("targetInfos", [])
+                       if t.get("type") == "page"]
+        if not page_targets:
+            return {"error": "No page targets found"}
+        target_id = page_targets[0]["targetId"]
+        attach_result = await session.send("Target.attachToTarget", {
+            "targetId": target_id, "flatten": True
+        })
+        page_session = attach_result.get("sessionId", "")
+        if not page_session:
+            return {"error": "Failed to attach to page target"}
+        await session.send("Page.enable", session_id=page_session)
 
         if action == "click":
             x = kwargs.get("x", 0)
@@ -482,14 +523,14 @@ async def _cdp_interact(ws_url: str, action: str, **kwargs) -> dict:
                 "x": x, "y": y,
                 "button": "left",
                 "clickCount": 1,
-            })
+            }, session_id=page_session)
             # Mouse release
             await session.send("Input.dispatchMouseEvent", {
                 "type": "mouseReleased",
                 "x": x, "y": y,
                 "button": "left",
                 "clickCount": 1,
-            })
+            }, session_id=page_session)
             return {"action": "click", "x": x, "y": y}
 
         elif action == "type":
@@ -499,11 +540,11 @@ async def _cdp_interact(ws_url: str, action: str, **kwargs) -> dict:
                     "type": "keyDown",
                     "text": char,
                     "key": char,
-                })
+                }, session_id=page_session)
                 await session.send("Input.dispatchKeyEvent", {
                     "type": "keyUp",
                     "key": char,
-                })
+                }, session_id=page_session)
             return {"action": "type", "text_length": len(text)}
 
         elif action == "key":
@@ -515,13 +556,13 @@ async def _cdp_interact(ws_url: str, action: str, **kwargs) -> dict:
                 "key": key,
                 "code": code,
                 "modifiers": modifiers,
-            })
+            }, session_id=page_session)
             await session.send("Input.dispatchKeyEvent", {
                 "type": "keyUp",
                 "key": key,
                 "code": code,
                 "modifiers": modifiers,
-            })
+            }, session_id=page_session)
             return {"action": "key", "key": key}
 
         elif action == "scroll":
@@ -534,7 +575,7 @@ async def _cdp_interact(ws_url: str, action: str, **kwargs) -> dict:
                 "x": x, "y": y,
                 "deltaX": delta_x,
                 "deltaY": delta_y,
-            })
+            }, session_id=page_session)
             return {"action": "scroll", "x": x, "y": y, "delta_x": delta_x, "delta_y": delta_y}
 
         elif action == "hover":
@@ -543,7 +584,7 @@ async def _cdp_interact(ws_url: str, action: str, **kwargs) -> dict:
             await session.send("Input.dispatchMouseEvent", {
                 "type": "mouseMoved",
                 "x": x, "y": y,
-            })
+            }, session_id=page_session)
             return {"action": "hover", "x": x, "y": y}
 
         else:
