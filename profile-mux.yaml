@@ -1,0 +1,21 @@
+# profile-mux.yaml — per-profile MCP tool family allowlist
+# Mounted at /data/profile-mux.yaml in the mcp pod.
+#
+# Each profile can only discover and execute tools from the listed families.
+# The meta family is always allowed (entry point).
+# Unknown profiles (not listed here) get ALL families (fail-open).
+#
+# To update: kubectl -n mcp cp profile-mux.yaml mcp-<pod>:/data/profile-mux.yaml
+# No restart needed — config is read on every request.
+
+profiles:
+  rook:
+    families: [todo, docs, k3s, gitea, storage, system]
+  archivist:
+    families: [docs, gitea]
+  scribe:
+    families: [docs]
+  gaia:
+    families: [docs, gitea]
+  boris:
+    families: [docs, gitea, todo]

@@ -45,7 +45,6 @@ from pydantic import BaseModel, Field
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-import a2a
 import browser_tools
 import docs_index
 import gitea_mirror
@@ -141,56 +140,18 @@ def agent_tool(family: str, always_static: bool = False):
     return deco
 
 
-# ================================================================ meta_* (microAgent + A2A)
+# ================================================================ meta_* (microAgent)
 @agent_tool(family="omni", always_static=True)
 def omni(query: str, execute: bool = False) -> str:
     """microAgent — natural language -> tool calls on this MCP server. Runs a
     short agentic loop over the full registered tool catalog (tool-calling
     against the LLM gateway). execute=False (default): read-only docs lookups
     allowed, mutating tools only PROPOSED — returns instructions / proposed
-    call chain. execute=True: actually executes tool calls (incl. a2a_comms)
+    call chain. execute=True: actually executes tool calls (any registered tool)
     and returns real results. Use for 'how do I...' (explain) and
     'tell/do X...' (execute=True) requests."""
     import omni as omni_mod
     return _ok(omni_mod.run_omni(registry, query, execute=execute))
-
-
-@agent_tool(family="a2a", always_static=True)
-def a2a_peers() -> str:
-    """List registered A2A peers (Hermes agent profiles reachable via their api_server):
-    name, api_url, capabilities, last update."""
-    return a2a.a2a_peers()
-
-
-@agent_tool(family="a2a", always_static=True)
-def a2a_register(name: str, api_url: str, api_key: str = "", capabilities: str = "") -> str:
-    """Add or update an A2A peer. api_url = the peer's Hermes api_server base
-    (e.g. http://192.168.1.2:8642 or http://192.168.1.2:8642/p/boris for a
-    multiplexed profile). api_key = Bearer token if the peer requires one."""
-    return a2a.a2a_register(name, api_url, api_key=api_key, capabilities=capabilities)
-
-
-@agent_tool(family="a2a", always_static=True)
-def a2a_comms(peer: str, message: str, sync: bool = False, timeout: int | None = None) -> str:
-    """Agent-to-agent message to a peer Hermes agent. sync=True: wait for the
-    peer's answer and return it inline (short asks). sync=False (default):
-    fire-and-forget — start a run on the peer, return its run_id immediately
-    (delegation/long work; poll with a2a_status). Messages are framed as
-    untrusted data on the peer side."""
-    return a2a.a2a_comms(peer, message, sync=sync, timeout=timeout)
-
-
-@agent_tool(family="a2a", always_static=True)
-def a2a_status(peer: str, run_id: str) -> str:
-    """Poll an async A2A run started with a2a_comms(sync=False): status + result
-    when finished."""
-    return a2a.a2a_status(peer, run_id)
-
-
-@agent_tool(family="a2a", always_static=True)
-def a2a_log(peer: str | None = None, limit: int = 20) -> str:
-    """Recent A2A message log (audit trail), optionally filtered by peer."""
-    return a2a.a2a_log(peer=peer, limit=limit)
 
 
 @agent_tool(family="meta", always_static=True)

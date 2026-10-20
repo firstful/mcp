@@ -47,7 +47,7 @@ DENY_TOOLS = {"omni"}
 # real documentation instead of guessing.
 READ_ONLY_TOOLS = {
     "docs_search", "docs_get", "docs_list", "docs_index_status",
-    "a2a_peers", "a2a_log", "tool_catalog", "discover_tool",
+    "tool_catalog", "discover_tool",
     "todo_list", "todo_summary", "todo_get", "todo_events",
 }
 
