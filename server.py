@@ -32,6 +32,8 @@ use the in-cluster ServiceAccount (read-only RBAC).
 
 from __future__ import annotations
 
+import asyncio
+
 import json
 import logging
 import os
@@ -598,15 +600,15 @@ def system_check_status(checks: list[str] | None = None) -> str:
 # as a result), calls, and leaves them up. Park again with vision_scale(0).
 # Images: base64 data: URI or raw base64 (media type sniffed from magic bytes).
 @agent_tool(family="vision")
-def vision_status() -> str:
+async def vision_status() -> str:
     """Vision service state: deployment replicas, ready endpoints for vision-api
     and vision-detect-worker, count of rook.io/avx nodes (the worker needs one).
     Call first when a read fails or before deciding to wake the service."""
-    return vision_tools.status()
+    return await asyncio.to_thread(vision_tools.status)
 
 
 @agent_tool(family="vision")
-def vision_read(capability: str, image: str, question: str | None = None,
+async def vision_read(capability: str, image: str, question: str | None = None,
                 object_name: str | None = None, model: str = "florence-2",
                 wake: bool = True) -> str:
     """Read an image with Florence-2. capability: describe (caption), query
@@ -615,15 +617,16 @@ def vision_read(capability: str, image: str, question: str | None = None,
     screenshot heuristic). `image` = data: URI or raw base64 (png/jpeg/gif/webp).
     Wakes the vision service from 0 automatically (~30-60s first call);
     EMPTY describe/query results are surfaced as errors, never passed through."""
-    return vision_tools.read(capability=capability, image=image, question=question,
-                             object_name=object_name, model=model, wake=wake)
+    return await asyncio.to_thread(
+        vision_tools.read, capability=capability, image=image, question=question,
+        object_name=object_name, model=model, wake=wake)
 
 
 @agent_tool(family="vision")
-def vision_scale(replicas: int) -> str:
+async def vision_scale(replicas: int) -> str:
     """Park (0) or wake (1) BOTH vision Deployments explicitly. vision_read
     wakes automatically; park when done reading to free the ML worker's RAM."""
-    return vision_tools.scale(replicas=replicas)
+    return await asyncio.to_thread(vision_tools.scale, replicas)
 
 
 # ================================================================ email_*
