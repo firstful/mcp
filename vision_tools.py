@@ -58,9 +58,13 @@ def _k8s(path: str, method: str = "GET", body: dict | None = None):
 
 
 def _replicas(dep: str):
+    """Read from the Deployment itself — the /scale subresource returns an EMPTY
+    spec{} for 0-replica deployments on this k3s (autoscaling/v1 quirk), which
+    used to surface as replicas=null."""
     try:
-        return (_k8s(f"/apis/apps/v1/namespaces/{NS}/deployments/{dep}/scale")
-                .get("spec", {}).get("replicas"))
+        r = (_k8s(f"/apis/apps/v1/namespaces/{NS}/deployments/{dep}")
+             .get("spec", {}).get("replicas"))
+        return 1 if r is None else r  # absent = API default 1
     except Exception:
         return None
 

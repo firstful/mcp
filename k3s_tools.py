@@ -448,12 +448,13 @@ def scale_deployment(name: str, namespace: str, replicas: int) -> str:
         replicas = int(replicas)
         if replicas < 0 or replicas > 20:
             return json.dumps({"error": "replicas must be between 0 and 20"})
-        scale = _clients["apps"].patch_namespaced_deployment_scale(
-            name, namespace, client.V1Scale(spec=client.V1ScaleSpec(replicas=replicas)))
+        # plain-dict body (client V1Scale models have serialization quirks at 0)
+        _clients["apps"].patch_namespaced_deployment_scale(
+            name, namespace, {"spec": {"replicas": replicas}})
         dep = _clients["apps"].read_namespaced_deployment(name, namespace)
         return json.dumps({
             "namespace": namespace, "deployment": name,
-            "replicas": scale.spec.replicas,
+            "replicas": dep.spec.replicas if dep.spec.replicas is not None else 0,
             "ready_replicas": (dep.status.ready_replicas or 0) if dep.status else 0,
             "image": dep.spec.template.spec.containers[0].image,
         })
