@@ -33,6 +33,7 @@ use the in-cluster ServiceAccount (read-only RBAC).
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import json
 import logging
@@ -190,7 +191,7 @@ def discover_tool(query: str, top_k: int = 5, min_score: float = 0.2) -> str:
 
 
 @agent_tool(family="meta", always_static=True)
-def execute_tool(tool_name: str, payload: dict | None = None) -> str:
+async def execute_tool(tool_name: str, payload: dict | None = None) -> str:
     """Call any registered tool by exact name with a JSON payload (validated
     against the tool's input schema). Returns {"ok": true, "tool": ...,
     "result": ...} on success, or {"ok": false, "tool": ..., "error":
@@ -198,6 +199,11 @@ def execute_tool(tool_name: str, payload: dict | None = None) -> str:
     Discover names + payload shapes with discover_tool()."""
     try:
         raw = registry.call(tool_name, payload or {})
+        if inspect.iscoroutine(raw):
+            # async tools (e.g. vision_* wake loops) — awaited HERE so the
+            # event loop stays free while the tool runs (FastMCP awaits this
+            # wrapper; probes stay served during long wakes)
+            raw = await raw
     except ToolError as exc:
         return _ok({"ok": False, "tool": tool_name, "error": {"type": exc.kind, "message": exc.message}})
     except Exception as exc:  # noqa: BLE001
