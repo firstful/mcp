@@ -435,3 +435,58 @@ def list_events(namespace: str | None = None, limit: int = 50) -> str:
         return json.dumps({"count": len(out), "events": out}, indent=1)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
+
+
+# ---- mutations (RBAC: ClusterRole mcp-deploy-mutate in apps/mcp/rbac.yaml) ----
+
+
+def scale_deployment(name: str, namespace: str, replicas: int) -> str:
+    """Set a Deployment's replica count (0..20)."""
+    _load()
+    from kubernetes import client
+    try:
+        replicas = int(replicas)
+        if replicas < 0 or replicas > 20:
+            return json.dumps({"error": "replicas must be between 0 and 20"})
+        scale = _clients["apps"].patch_namespaced_deployment_scale(
+            name, namespace, client.V1Scale(spec=client.V1ScaleSpec(replicas=replicas)))
+        dep = _clients["apps"].read_namespaced_deployment(name, namespace)
+        return json.dumps({
+            "namespace": namespace, "deployment": name,
+            "replicas": scale.spec.replicas,
+            "ready_replicas": (dep.status.ready_replicas or 0) if dep.status else 0,
+            "image": dep.spec.template.spec.containers[0].image,
+        })
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+def restart_deployment(name: str, namespace: str) -> str:
+    """Rolling restart: stamps kubectl.kubernetes.io/restartedAt on the pod
+    template (same as `kubectl rollout restart`)."""
+    _load()
+    try:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _clients["apps"].patch_namespaced_deployment(name, namespace, {
+            "spec": {"template": {"metadata": {"annotations": {
+                "kubectl.kubernetes.io/restartedAt": now}}}}})
+        return json.dumps({"namespace": namespace, "deployment": name,
+                           "restarted_at": now})
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+def delete_pod(name: str, namespace: str, grace_period_seconds: int = 30) -> str:
+    """Delete a pod (its controller recreates it — the standard fix for a stuck
+    or wedged pod). For bare pods this is destructive — only use on
+    controller-managed pods unless explicitly intended."""
+    _load()
+    try:
+        grace = max(0, min(int(grace_period_seconds), 600))
+        _clients["core"].delete_namespaced_pod(
+            name, namespace, grace_period_seconds=grace)
+        return json.dumps({"namespace": namespace, "pod": name,
+                           "deleted": True, "grace_period_seconds": grace,
+                           "note": "controller (ReplicaSet/Job) recreates it"})
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)

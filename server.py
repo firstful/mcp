@@ -53,6 +53,7 @@ import gitea_tools
 import k3s_tools
 import storage_tools
 import system_checks
+import vision_tools
 from todos_store import DEFAULT_TTL, TodoError, TodosStore, set_mirror_hook
 from tool_registry import ToolError, ToolRegistry
 from tool_vectors import ToolIndex
@@ -444,6 +445,36 @@ def k3s_list_events(namespace: str | None = None, limit: int = 50) -> str:
     return k3s_tools.list_events(namespace=namespace, limit=limit)
 
 
+
+# ---- kubectl-equivalent mutations (RBAC: ClusterRole mcp-deploy-mutate) ----
+@agent_tool(family="k3s")
+def k3s_scale_deployment(namespace: str, name: str, replicas: int) -> str:
+    """Scale a Deployment to `replicas` (0..20) — wake a parked service (0->1)
+    or park one (1->0). Equivalent to `kubectl scale deploy/<name> -n <ns>`.
+    CAUTION (GitOps): if the app's manifest pins `replicas:`, Flux reverts this
+    within ~3 min — durable changes belong in reeds/sutliff-cluster; transient
+    apps (manifest omits replicas) stay as set."""
+    return k3s_tools.scale_deployment(name=name, namespace=namespace, replicas=replicas)
+
+
+@agent_tool(family="k3s")
+def k3s_restart_deployment(namespace: str, name: str) -> str:
+    """Rolling-restart a Deployment (stamps restartedAt on the pod template) —
+    equivalent to `kubectl rollout restart deploy/<name> -n <ns>`. The standard
+    fix after a config change or a wedged workload; Flux-safe (restart effect
+    persists even though Flux strips the annotation later)."""
+    return k3s_tools.restart_deployment(name=name, namespace=namespace)
+
+
+@agent_tool(family="k3s")
+def k3s_delete_pod(namespace: str, name: str, grace_period_seconds: int = 30) -> str:
+    """Delete a pod so its controller recreates it — the standard fix for a
+    stuck/crashlooping/evicted pod (check k3s_get_pod + k3s_pod_logs first!).
+    DESTRUCTIVE for bare pods (no controller) — only then requires intent."""
+    return k3s_tools.delete_pod(name=name, namespace=namespace,
+                                grace_period_seconds=grace_period_seconds)
+
+
 # ================================================================ gitea_*
 @agent_tool(family="gitea")
 def gitea_list_repos(owner: str = "reeds") -> str:
@@ -558,6 +589,41 @@ def system_check_status(checks: list[str] | None = None) -> str:
     router, disk-space for host storage."""
     return system_checks.check_status(checks)
 
+
+
+# ================================================================ vision_*
+# Florence-2 image reading (vision-api, ns vision). Both Deployments park at 0
+# (git manifest omits replicas); vision_read wakes them, waits for BOTH
+# endpoints (the api silently degrades to "" without its worker — never trusted
+# as a result), calls, and leaves them up. Park again with vision_scale(0).
+# Images: base64 data: URI or raw base64 (media type sniffed from magic bytes).
+@agent_tool(family="vision")
+def vision_status() -> str:
+    """Vision service state: deployment replicas, ready endpoints for vision-api
+    and vision-detect-worker, count of rook.io/avx nodes (the worker needs one).
+    Call first when a read fails or before deciding to wake the service."""
+    return vision_tools.status()
+
+
+@agent_tool(family="vision")
+def vision_read(capability: str, image: str, question: str | None = None,
+                object_name: str | None = None, model: str = "florence-2",
+                wake: bool = True) -> str:
+    """Read an image with Florence-2. capability: describe (caption), query
+    (VQA — requires `question`), detect (object rects; `object_name` narrows to
+    one class, omit for all objects → {x1,y1,x2,y2} boxes), kind (photo vs
+    screenshot heuristic). `image` = data: URI or raw base64 (png/jpeg/gif/webp).
+    Wakes the vision service from 0 automatically (~30-60s first call);
+    EMPTY describe/query results are surfaced as errors, never passed through."""
+    return vision_tools.read(capability=capability, image=image, question=question,
+                             object_name=object_name, model=model, wake=wake)
+
+
+@agent_tool(family="vision")
+def vision_scale(replicas: int) -> str:
+    """Park (0) or wake (1) BOTH vision Deployments explicitly. vision_read
+    wakes automatically; park when done reading to free the ML worker's RAM."""
+    return vision_tools.scale(replicas=replicas)
 
 
 # ================================================================ email_*
