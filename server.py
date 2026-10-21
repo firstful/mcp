@@ -47,6 +47,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 import browser_tools
 import docs_index
+import email_tools
 import gitea_mirror
 import gitea_tools
 import k3s_tools
@@ -556,6 +557,60 @@ def system_check_status(checks: list[str] | None = None) -> str:
     wan-access for internet/WAN reachability, router-alive for the OPNsense
     router, disk-space for host storage."""
     return system_checks.check_status(checks)
+
+
+
+# ================================================================ email_*
+# Read-mostly family over the email-sync service (ns `email`). Metadata is
+# cheap; bodies go through the audited fetch — email-sync's body_access_log is
+# the receipt trail the email-sync-ops skill relies on. Discovery-first:
+# email_search -> email_message_meta -> (only if needed) email_fetch_body,
+# and check email_audit before re-fetching anything.
+@agent_tool(family="email")
+def email_status() -> str:
+    """email-sync health + inbox/unseen counters. FIRST call before any mail
+    work: ok=false or inbox=0 means the pipeline (or IMAP credentials) is
+    down — report that instead of hunting for messages."""
+    return email_tools.status()
+
+
+@agent_tool(family="email")
+def email_search(folder: str = "INBOX", limit: int = 25,
+                 unseen: bool | None = None, q: str | None = None) -> str:
+    """Envelope-only message list (uid, subject, from, date, size — NO bodies).
+    limit max 500. unseen=true -> only unseen. q -> matches subject/from/raw.
+    Use to FIND a message; fetch a body only when content is genuinely needed."""
+    return email_tools.search(folder=folder, limit=limit, unseen=unseen, q=q)
+
+
+@agent_tool(family="email")
+def email_message_meta(uid: str, folder: str = "INBOX") -> str:
+    """Metadata for ONE message: headers, subject, date, size, attachment list
+    (filenames/types/sizes — no body). Cheaper triage step before a body fetch."""
+    return email_tools.message_meta(uid=uid, folder=folder)
+
+
+@agent_tool(family="email")
+def email_fetch_body(uid: str, folder: str = "INBOX", reason: str = "") -> str:
+    """Raw RFC822 body of one message. AUDITED: recorded with your X-Audit-Reason
+    (reason is REQUIRED — e.g. otp-code, reed-request, newsletter). Truncated at
+    200 KB. Check email_audit first to see whether someone already fetched it."""
+    return email_tools.fetch_body(uid=uid, folder=folder, reason=reason)
+
+
+@agent_tool(family="email")
+def email_audit(limit: int = 20) -> str:
+    """Recent body-access audit trail (ts, source ip, user-agent, reason,
+    outcome, status). The audit is the receipt: a body_read row with your
+    reason means the fetch ALREADY succeeded — don't duplicate the work."""
+    return email_tools.audit(limit=limit)
+
+
+@agent_tool(family="email")
+def email_sync(folder: str = "INBOX") -> str:
+    """Trigger an immediate IMAP sync (no-op if one is in flight). Use after
+    email_status shows a stale inbox when live mail is needed now."""
+    return email_tools.trigger_sync(folder=folder)
 
 
 # ================================================================ browser_*
