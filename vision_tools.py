@@ -171,6 +171,13 @@ def read(capability: str, image: str, question: str | None = None,
         raise ToolError("bad_request", f"capability must be one of {CAPS}")
     if capability == "query" and not (question or "").strip():
         raise ToolError("bad_request", "query requires a `question` (VQA prompt)")
+    if capability == "detect" and not (object_name or "").strip():
+        # deployed API contract (SPEC-VISION-API): 400 {"object is required"} —
+        # the all-objects <OD> path is not exposed over HTTP
+        raise ToolError("bad_request",
+                        "detect requires `object_name` (the API rejects empty/"
+                        "missing object — name the thing to box, e.g. 'stool', "
+                        "'cat', 'printer'. There is no all-objects mode.)")
     payload = {"model": model, "image": _data_uri(image)}
     if question:
         payload["question"] = question
@@ -178,17 +185,29 @@ def read(capability: str, image: str, question: str | None = None,
         payload["object"] = object_name
     if wake:
         _ensure_awake()
-    req = urllib.request.Request(
-        f"{API}/v1/{capability}", data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"}, method="POST")
+    def _post():
+        req = urllib.request.Request(
+            f"{API}/v1/{capability}", data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=CALL_TIMEOUT) as r:
+                return json.loads(r.read().decode(errors="replace") or "{}")
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:400]
+            raise ToolError("tool_error", f"vision-api HTTP {e.code}: {detail}") from e
+        except Exception as e:  # noqa: BLE001
+            raise ToolError("tool_error", f"vision-api unreachable ({API}): {e}") from e
+
     try:
-        with urllib.request.urlopen(req, timeout=CALL_TIMEOUT) as r:
-            body = json.loads(r.read().decode(errors="replace") or "{}")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode(errors="replace")[:400]
-        raise ToolError("tool_error", f"vision-api HTTP {e.code}: {detail}") from e
-    except Exception as e:  # noqa: BLE001
-        raise ToolError("tool_error", f"vision-api unreachable ({API}): {e}") from e
+        body = _post()
+    except ToolError as exc:
+        # wake race: endpoints ready but the worker's model still initializing
+        # ("provider unreachable"/"provider error") — one retry after a beat
+        if "provider" in exc.message and wake:
+            time.sleep(8)
+            body = _post()
+        else:
+            raise
     # degrade signals empty results per spec — surface them, never pass silent "" home
     if capability in ("describe", "query") and not body.get("text") and not body.get("answer"):
         raise ToolError("tool_error",

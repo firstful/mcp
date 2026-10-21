@@ -618,11 +618,15 @@ async def vision_read(capability: str, image: str, question: str | None = None,
                 object_name: str | None = None, model: str = "florence-2",
                 wake: bool = True) -> str:
     """Read an image with Florence-2. capability: describe (caption), query
-    (VQA — requires `question`), detect (object rects; `object_name` narrows to
-    one class, omit for all objects → {x1,y1,x2,y2} boxes), kind (photo vs
-    screenshot heuristic). `image` = data: URI or raw base64 (png/jpeg/gif/webp).
-    Wakes the vision service from 0 automatically (~30-60s first call);
-    EMPTY describe/query results are surfaced as errors, never passed through."""
+    (VQA — requires `question`), detect (bounding boxes for ONE named thing —
+    `object_name` REQUIRED, e.g. 'stool'/'cat'; no all-objects mode over HTTP;
+    returns {x1,y1,x2,y2} boxes in <=1024px space), kind (photo vs screenshot
+    heuristic). `image` = data: URI or raw base64 (png/jpeg/gif/webp); keep the
+    payload under ~90KB via the skill CLI client (argv limit) — larger images:
+    inline base64 over direct MCP HTTP.
+    Wakes the vision service from 0 automatically (~30-60s first call, one
+    auto-retry on the wake race); EMPTY describe/query results are surfaced as
+    errors, never passed through."""
     return await asyncio.to_thread(
         vision_tools.read, capability=capability, image=image, question=question,
         object_name=object_name, model=model, wake=wake)
