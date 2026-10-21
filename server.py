@@ -146,20 +146,6 @@ def agent_tool(family: str, always_static: bool = False):
     return deco
 
 
-# ================================================================ meta_* (microAgent)
-@agent_tool(family="omni", always_static=True)
-def omni(query: str, execute: bool = False) -> str:
-    """microAgent — natural language -> tool calls on this MCP server. Runs a
-    short agentic loop over the full registered tool catalog (tool-calling
-    against the LLM gateway). execute=False (default): read-only docs lookups
-    allowed, mutating tools only PROPOSED — returns instructions / proposed
-    call chain. execute=True: actually executes tool calls (any registered tool)
-    and returns real results. Use for 'how do I...' (explain) and
-    'tell/do X...' (execute=True) requests."""
-    import omni as omni_mod
-    return _ok(omni_mod.run_omni(registry, query, execute=execute))
-
-
 @agent_tool(family="meta", always_static=True)
 def discover_tool(query: str, top_k: int = 5, min_score: float = 0.2) -> str:
     """Semantic search over the tool catalog (embedding DB). Returns ranked
@@ -311,24 +297,6 @@ def todo_summary() -> str:
 def todo_events(todo_id: int | None = None, limit: int = 50) -> str:
     """Audit trail of all actions (created/claimed/renewed/completed/released/expired/deleted)."""
     return _ok(store.events(todo_id=todo_id, limit=limit))
-
-
-@agent_tool(family="todo")
-def todo_mirror_status() -> str:
-    """Gitea mirror status: enabled, target repo, label readiness, last reconcile."""
-    return _ok(gitea_mirror.status())
-
-
-@agent_tool(family="todo")
-def todo_mirror_reconcile() -> str:
-    """Force a full reconcile sweep against Gitea: create missing issues, fix
-    drift (labels/assignee/state/due date). Returns created/updated counts."""
-    if gitea_mirror.mirror is None:
-        return _ok({"error": "mirror_disabled", "message": "GITEA_MIRROR_TOKEN not set"})
-    try:
-        return _ok(gitea_mirror.mirror.reconcile(store.list()))
-    except TodoError as e:
-        return _ok({"error": e.code, "message": e.message})
 
 
 # ================================================================ docs_*
