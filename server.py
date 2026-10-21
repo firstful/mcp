@@ -53,6 +53,7 @@ import docs_index
 import email_tools
 import gitea_mirror
 import gitea_tools
+import hermes_tools
 import k3s_tools
 import storage_tools
 import system_checks
@@ -597,6 +598,29 @@ def system_check_status(checks: list[str] | None = None) -> str:
     router, disk-space for host storage."""
     return system_checks.check_status(checks)
 
+
+
+# ================================================================ hermes_*
+# Gateway runs API (default/Rook agent) — fire-and-poll background rail that
+# replaced the removed A2A dispatch. Never block inside a tool call: start,
+# then poll hermes_run_status. Runs die with gateway restarts.
+@agent_tool(family="hermes")
+def hermes_start_run(input: str, label: str = "") -> str:
+    """Start a background run on the hermes gateway (executes as the default
+    Rook agent) — the post-A2A replacement for hermes-a2a-run. Fire-and-return:
+    you get {run_id, status:'started'} immediately; poll hermes_run_status for
+    output. Use for long/multi-step tasks you must not block on. Prompt should
+    be self-contained (the run starts with fresh context)."""
+    return hermes_tools.start_run(input_text=input, label=label)
+
+
+@agent_tool(family="hermes")
+def hermes_run_status(run_id: str) -> str:
+    """Poll a run started with hermes_start_run: status (started/running/
+    completed/failed), output text, usage. done=true when terminal. A gateway
+    restart destroys in-flight runs (run_not_found) — check the worktree/
+    artifacts before re-dispatching."""
+    return hermes_tools.run_status(run_id=run_id)
 
 
 # ================================================================ vision_*
