@@ -120,9 +120,9 @@ SMTP_PASS = os.environ.get("SMTP_PASSWORD") or os.environ.get("IMAP_PASSWORD") o
 SMTP_FROM_DEFAULT = os.environ.get("SMTP_FROM_DEFAULT", "rook@ffilt.us")
 # Constraint (Reed, 2026-11-12): only send as rook for now.
 _ALLOWED_FROM = {"rook@ffilt.us"}
-ROOK_INTRO_PLAIN = "Hi, I'm Rook, an automated assistant for the Sutliff household.\n\n"
-ROOK_INTRO_HTML = "<p>Hi, I'm Rook, an automated assistant for the Sutliff household.</p>"
 BLACKLIST_PATH = os.environ.get("EMAIL_SEND_BLACKLIST_PATH", "/data/email_send_blacklist.json")
+LLM_API_BASE = os.environ.get("LLM_API_BASE", "http://192.168.1.2:8088/v1").rstrip("/")
+LLM_CLASSIFY_MODEL = os.environ.get("LLM_CLASSIFY_MODEL", "auto")
 
 _ABUSIVE_PATTERNS = [
     r"\bfuck\s+(?:you|off)\b",
@@ -226,6 +226,52 @@ def _addr_list(v):
     return [xs] if xs else []
 
 
+def _classify_agent_origin(subject: str, body: str, html: str | None = None) -> dict:
+    """Call llm.homelab.local-compatible gateway to classify whether the email
+    correctly identifies itself as agent-originating (automated assistant/AI/bot)."""
+    text = (body or "").strip()
+    if html and len(text) < 200:
+        # include a small HTML hint if body is sparse
+        text = (text + "\n\n[HTML excerpt]\n" + _re.sub(r"<[^>]+>", " ", html)[:1500]).strip()
+    content = f"Subject: {subject or ''}\n\n{text[:4000]}"
+    prompt = (
+        "Classify whether this outgoing email correctly identifies itself as originating "
+        "from an automated agent/assistant/bot/AI (not a human personally writing). "
+        "Examples of sufficient identification: states it is an automated assistant, AI agent, bot, "
+        "or clearly identifies Rook as an automated assistant/system. "
+        "Return ONLY strict JSON: {\"agent_originating\": true|false, \"reason\": \"short reason\"}."
+    )
+    payload = {
+        "model": LLM_CLASSIFY_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a strict classifier. Output valid JSON only."},
+            {"role": "user", "content": prompt + "\n\nEMAIL:\n" + content},
+        ],
+        "temperature": 0,
+    }
+    data = _json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{LLM_API_BASE}/chat/completions",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            resp = _json.loads(r.read().decode(errors="replace") or "{}")
+        msg = (((resp.get("choices") or [{}])[0]).get("message") or {})
+        raw = (msg.get("content") or "").strip()
+        # extract JSON object
+        m = _re.search(r"\{.*\}", raw, _re.S)
+        obj = _json.loads(m.group(0)) if m else {}
+        identified = bool(obj.get("agent_originating") is True)
+        reason = str(obj.get("reason") or raw or "")[:300]
+        return {"ok": True, "agent_originating": identified, "reason": reason, "model": LLM_CLASSIFY_MODEL}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "model": LLM_CLASSIFY_MODEL}
+
+
+
 def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
          body: str = "", html: str | None = None, cc=None, bcc=None,
          in_reply_to: str | None = None, references=None,
@@ -234,7 +280,8 @@ def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
 
     Auth uses SMTP_USERNAME/SMTP_PASSWORD (falls back to IMAP_USERNAME/IMAP_PASSWORD),
     same credentials as email-sync. Tries 465/SSL then 587/STARTTLS.
-    Enforces From=rook@ffilt.us only and prepends Rook's automated-assistant intro.
+    Enforces From=rook@ffilt.us only. Calls LLM (model auto) to classify that the email
+    correctly identifies itself as agent-originating; denies send if not identified.
     Enforces a persistent send blacklist (abusive/hostile contacts). Supports threading
     headers (In-Reply-To/References). Returns structured JSON; never includes credential material.
     """
@@ -292,14 +339,27 @@ def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
             "from": from_addr, "to": to_addrs, "subject": subject,
         })
 
-    # Ensure Rook introduces itself as an automated assistant in every outgoing email.
-    plain_body = body or ""
-    if "automated assistant" not in plain_body.lower():
-        plain_body = ROOK_INTRO_PLAIN + plain_body
-    html_body = html
-    if html_body is not None and "automated assistant" not in html_body.lower():
-        html_body = ROOK_INTRO_HTML + html_body
+    # Require the email to correctly identify itself as agent-originating (LLM classification).
+    classification = _classify_agent_origin(subject or "", body or "", html)
+    if not classification.get("ok"):
+        return json.dumps({
+            "ok": False,
+            "error": "agent_identity_classification_failed",
+            "message": "Could not classify whether email identifies itself as agent-originating; send denied.",
+            "from": from_addr, "to": to_addrs, "cc": cc_addrs, "bcc": bcc_addrs,
+            "subject": subject or "", "classification": classification,
+        })
+    if not classification.get("agent_originating"):
+        return json.dumps({
+            "ok": False,
+            "error": "agent_identity_required",
+            "message": "Send denied: email must clearly identify itself as originating from an automated agent/assistant.",
+            "from": from_addr, "to": to_addrs, "cc": cc_addrs, "bcc": bcc_addrs,
+            "subject": subject or "", "classification": classification,
+        })
 
+    plain_body = body or ""
+    html_body = html
     msg = EmailMessage()
     msg["From"] = from_addr
     msg["To"] = ", ".join(to_addrs)
@@ -351,6 +411,7 @@ def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
                 "in_reply_to": msg.get("In-Reply-To", ""),
                 "references": msg.get("References", ""),
                 "refused": refused or {},
+                "agent_identity_classification": classification,
             })
         except Exception as e:  # noqa: BLE001
             errors.append({"port": port, "mode": mode, "error": f"{type(e).__name__}: {e}"})

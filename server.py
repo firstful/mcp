@@ -694,8 +694,9 @@ def email_send(to, subject: str, body: str, sender: str = "rook@ffilt.us",
 
     - sender/from: rook@ffilt.us only (enforced).
     - to/cc/bcc: recipient string(s) or list(s).
-    - subject/body/html: message content. Outgoing messages always include Rook's
-      introduction as an automated assistant for the Sutliff household.
+    - subject/body/html: message content. Before sending, calls LLM (model auto,
+      llm.homelab.local/gateway) to classify that the email correctly identifies
+      itself as agent-originating; send is denied if not identified.
     - in_reply_to/references: optional RFC threading headers for replies.
     - reply_to_abusive: if true, treats interaction as abusive/hostile, blacklists
       involved external recipients, and denies send (persistent blacklist).
