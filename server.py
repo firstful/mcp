@@ -684,6 +684,28 @@ def email_sync(folder: str = "INBOX") -> str:
     return email_tools.trigger_sync(folder=folder)
 
 
+<<<<<<< HEAD
+=======
+@agent_tool(family="email")
+def email_send(to, subject: str, body: str, sender: str = "reed@ffilt.us",
+               cc=None, bcc=None, html: str | None = None) -> str:
+    """Send an email via Namecheap Private Email SMTP (mail.privateemail.com, 465 SSL
+    with 587 STARTTLS fallback) as an authorized ffilt.us alias.
+
+    - sender/from: reed@ffilt.us (default), rook@ffilt.us, or alert@ffilt.us (must be
+      an authorized alias on the mailbox). Aliases are validated server-side.
+    - to: recipient string or list (comma/semicolon-separated strings accepted).
+    - cc/bcc: optional recipient string(s) or list(s).
+    - subject/body: plain-text message; html optional for a multipart alternative.
+    Returns structured JSON (ok, from, to, subject, transport/host/port/mode used,
+    message_id if available, refused recipients, or error). Secrets are never returned.
+    """
+    return email_tools.send(sender=sender, to=to, subject=subject, body=body,
+                            html=html, cc=cc, bcc=bcc)
+
+
+
+>>>>>>> mcp 2.3.9: sync deployed source, add email_send SMTP tool
 # ================================================================ browser_*
 @agent_tool(family="browser")
 def browser_session_list() -> str:

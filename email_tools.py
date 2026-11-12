@@ -104,3 +104,130 @@ def trigger_sync(folder: str = "INBOX") -> str:
         raise ToolError("tool_error", f"sync POST HTTP {e.code}: {e.read()[:200]!r}") from e
     except Exception as e:  # noqa: BLE001
         raise ToolError("tool_error", f"email-sync unreachable ({API}): {e}") from e
+<<<<<<< HEAD
+=======
+
+# ------------------------------ SMTP send ------------------------------
+
+import smtplib
+import ssl
+from email.message import EmailMessage
+from email.utils import make_msgid, formatdate
+
+SMTP_HOST = os.environ.get("SMTP_HOST", "mail.privateemail.com")
+SMTP_USER = os.environ.get("SMTP_USERNAME") or os.environ.get("IMAP_USERNAME") or ""
+SMTP_PASS = os.environ.get("SMTP_PASSWORD") or os.environ.get("IMAP_PASSWORD") or ""
+SMTP_FROM_DEFAULT = os.environ.get("SMTP_FROM_DEFAULT", "reed@ffilt.us")
+_ALLOWED_FROM = {"reed@ffilt.us", "rook@ffilt.us", "alert@ffilt.us"}
+
+
+def _addr_list(v):
+    if v is None:
+        return []
+    if isinstance(v, str):
+        # allow comma/semicolon separated
+        parts = re.split(r'[;,]+', v)
+        return [p.strip() for p in parts if p and p.strip()]
+    if isinstance(v, list):
+        out = []
+        for x in v:
+            if x is None:
+                continue
+            xs = str(x).strip()
+            if xs:
+                out.append(xs)
+        return out
+    xs = str(v).strip()
+    return [xs] if xs else []
+
+
+def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
+         body: str = "", html: str | None = None, cc=None, bcc=None) -> str:
+    """Send an email via Namecheap Private Email SMTP.
+
+    Auth uses SMTP_USERNAME/SMTP_PASSWORD (falls back to IMAP_USERNAME/IMAP_PASSWORD),
+    same credentials as email-sync. Tries 465/SSL then 587/STARTTLS.
+    Returns structured JSON; never includes credential material.
+    """
+    from_addr = (sender or SMTP_FROM_DEFAULT or "reed@ffilt.us").strip().lower()
+    if from_addr not in _ALLOWED_FROM:
+        return json.dumps({
+            "ok": False,
+            "error": "invalid_from",
+            "message": f"from must be one of {sorted(_ALLOWED_FROM)}",
+            "from": sender,
+            "to": _addr_list(to if to is not None else recipients),
+            "subject": subject,
+        })
+    to_addrs = _addr_list(to if to is not None else recipients)
+    cc_addrs = _addr_list(cc)
+    bcc_addrs = _addr_list(bcc)
+    if not to_addrs:
+        return json.dumps({
+            "ok": False, "error": "bad_request", "message": "to/recipients is required",
+            "from": from_addr, "to": to_addrs, "subject": subject,
+        })
+    if not SMTP_USER or not SMTP_PASS:
+        return json.dumps({
+            "ok": False, "error": "missing_credentials",
+            "message": "SMTP auth credentials not configured (SMTP_USERNAME/SMTP_PASSWORD)",
+            "from": from_addr, "to": to_addrs, "subject": subject,
+        })
+
+    msg = EmailMessage()
+    msg["From"] = from_addr
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
+    msg["Subject"] = subject or ""
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain="ffilt.us")
+    msg.set_content(body or "")
+    if html:
+        msg.add_alternative(html, subtype="html")
+
+    all_rcpts = to_addrs + cc_addrs + bcc_addrs
+    errors = []
+    for port, mode in ((465, "ssl"), (587, "starttls")):
+        try:
+            if mode == "ssl":
+                ctx = ssl.create_default_context()
+                with smtplib.SMTP_SSL(SMTP_HOST, port, context=ctx, timeout=25) as s:
+                    s.login(SMTP_USER, SMTP_PASS)
+                    refused = s.send_message(msg, from_addr=from_addr, to_addrs=all_rcpts)
+            else:
+                ctx = ssl.create_default_context()
+                with smtplib.SMTP(SMTP_HOST, port, timeout=25) as s:
+                    s.ehlo()
+                    s.starttls(context=ctx)
+                    s.ehlo()
+                    s.login(SMTP_USER, SMTP_PASS)
+                    refused = s.send_message(msg, from_addr=from_addr, to_addrs=all_rcpts)
+            return json.dumps({
+                "ok": True,
+                "from": from_addr,
+                "to": to_addrs,
+                "cc": cc_addrs,
+                "bcc": bcc_addrs,
+                "subject": subject or "",
+                "transport": "smtp",
+                "host": SMTP_HOST,
+                "port": port,
+                "mode": mode,
+                "message_id": msg.get("Message-ID"),
+                "refused": refused or {},
+            })
+        except Exception as e:  # noqa: BLE001
+            errors.append({"port": port, "mode": mode, "error": f"{type(e).__name__}: {e}"})
+    return json.dumps({
+        "ok": False,
+        "error": "send_failed",
+        "from": from_addr,
+        "to": to_addrs,
+        "cc": cc_addrs,
+        "bcc": bcc_addrs,
+        "subject": subject or "",
+        "host": SMTP_HOST,
+        "attempts": errors,
+    })
+>>>>>>> mcp 2.3.9: sync deployed source, add email_send SMTP tool
