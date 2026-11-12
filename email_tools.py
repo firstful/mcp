@@ -107,6 +107,8 @@ def trigger_sync(folder: str = "INBOX") -> str:
 
 # ------------------------------ SMTP send ------------------------------
 
+import json as _json
+import re as _re
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -120,14 +122,96 @@ SMTP_FROM_DEFAULT = os.environ.get("SMTP_FROM_DEFAULT", "rook@ffilt.us")
 _ALLOWED_FROM = {"rook@ffilt.us"}
 ROOK_INTRO_PLAIN = "Hi, I'm Rook, an automated assistant for the Sutliff household.\n\n"
 ROOK_INTRO_HTML = "<p>Hi, I'm Rook, an automated assistant for the Sutliff household.</p>"
+BLACKLIST_PATH = os.environ.get("EMAIL_SEND_BLACKLIST_PATH", "/data/email_send_blacklist.json")
 
+_ABUSIVE_PATTERNS = [
+    r"\bfuck\s+(?:you|off)\b",
+    r"\bfuck\s*off\b",
+    r"\bgo\s+fuck\s+yourself\b",
+    r"\beat\s+shit\b",
+    r"\bkill\s+yourself\b",
+    r"\bdie\s+in\s+a\s+fire\b",
+    r"\bpiss\s+off\b",
+    r"\bdon'?t\s+(?:ever\s+)?(?:email|contact|message)\s+me\b",
+    r"\bstop\s+(?:emailing|contacting|messaging)\s+me\b",
+    r"\bleave\s+me\s+alone\b",
+]
+
+def _norm_email(addr: str) -> str:
+    a = (addr or "").strip().lower()
+    m = _re.search(r"<([^>]+)>", a)
+    return (m.group(1) if m else a).strip()
+
+def _load_blacklist():
+    try:
+        with open(BLACKLIST_PATH, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        if isinstance(data, dict):
+            bl = data.get("blacklist")
+            if isinstance(bl, list):
+                return {_norm_email(x): {"reason": "blacklisted"} for x in bl if _norm_email(str(x))}
+            entries = data.get("entries")
+            if isinstance(entries, dict):
+                return { _norm_email(k): (v if isinstance(v, dict) else {"reason": str(v)}) for k,v in entries.items() if _norm_email(k) }
+        if isinstance(data, list):
+            return {_norm_email(x): {"reason": "blacklisted"} for x in data if _norm_email(str(x))}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    return {}
+
+def _save_blacklist(bl: dict):
+    try:
+        d = os.path.dirname(BLACKLIST_PATH)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = BLACKLIST_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump({"entries": bl}, f, indent=2, sort_keys=True)
+        os.replace(tmp, BLACKLIST_PATH)
+    except Exception:
+        pass
+
+def blacklist_add(addrs, reason: str = "abusive/hostile language"):
+    bl = _load_blacklist()
+    changed = False
+    for a in (addrs or []):
+        n = _norm_email(a)
+        if not n or n in _ALLOWED_FROM:
+            continue
+        if n not in bl:
+            bl[n] = {"reason": reason}
+            changed = True
+    if changed:
+        _save_blacklist(bl)
+    return bl
+
+def _blacklisted_hits(addrs):
+    bl = _load_blacklist()
+    hits = []
+    for a in (addrs or []):
+        n = _norm_email(a)
+        if n and n in bl:
+            hits.append(n)
+    # dedupe preserve order
+    out = []
+    seen = set()
+    for h in hits:
+        if h not in seen:
+            seen.add(h); out.append(h)
+    return out
+
+def _detect_abusive(text: str) -> bool:
+    t = (text or "").lower()
+    return any(_re.search(p, t) for p in _ABUSIVE_PATTERNS)
 
 def _addr_list(v):
     if v is None:
         return []
     if isinstance(v, str):
         # allow comma/semicolon separated
-        parts = re.split(r'[;,]+', v)
+        parts = _re.split(r'[;,]+', v)
         return [p.strip() for p in parts if p and p.strip()]
     if isinstance(v, list):
         out = []
@@ -144,14 +228,15 @@ def _addr_list(v):
 
 def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
          body: str = "", html: str | None = None, cc=None, bcc=None,
-         in_reply_to: str | None = None, references=None) -> str:
+         in_reply_to: str | None = None, references=None,
+         reply_to_abusive: bool = False) -> str:
     """Send an email via Namecheap Private Email SMTP.
 
     Auth uses SMTP_USERNAME/SMTP_PASSWORD (falls back to IMAP_USERNAME/IMAP_PASSWORD),
     same credentials as email-sync. Tries 465/SSL then 587/STARTTLS.
     Enforces From=rook@ffilt.us only and prepends Rook's automated-assistant intro.
-    Supports threading headers (In-Reply-To/References). Returns structured JSON;
-    never includes credential material.
+    Enforces a persistent send blacklist (abusive/hostile contacts). Supports threading
+    headers (In-Reply-To/References). Returns structured JSON; never includes credential material.
     """
     from_addr = (sender or SMTP_FROM_DEFAULT or "rook@ffilt.us").strip().lower()
     if from_addr not in _ALLOWED_FROM:
@@ -166,10 +251,39 @@ def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
     to_addrs = _addr_list(to if to is not None else recipients)
     cc_addrs = _addr_list(cc)
     bcc_addrs = _addr_list(bcc)
+    all_targets = to_addrs + cc_addrs + bcc_addrs
     if not to_addrs:
         return json.dumps({
             "ok": False, "error": "bad_request", "message": "to/recipients is required",
             "from": from_addr, "to": to_addrs, "subject": subject,
+        })
+
+    # Blacklist enforcement: if replying to abusive/hostile content (or message is abusive),
+    # blacklist involved external recipients and deny send.
+    if reply_to_abusive or _detect_abusive(subject) or _detect_abusive(body):
+        ext = [a for a in all_targets if _norm_email(a) and _norm_email(a) not in _ALLOWED_FROM]
+        if reply_to_abusive and ext:
+            blacklist_add(ext, reason="abusive/hostile language reported (reply_to_abusive)")
+        hits = _blacklisted_hits(all_targets)
+        if reply_to_abusive and not hits and ext:
+            hits = sorted({_norm_email(a) for a in ext})
+        if hits or (reply_to_abusive and ext):
+            return json.dumps({
+                "ok": False,
+                "error": "blacklisted",
+                "message": "Send denied: abusive/hostile language reported; recipient(s) blacklisted.",
+                "from": from_addr, "to": to_addrs, "cc": cc_addrs, "bcc": bcc_addrs,
+                "subject": subject, "blacklisted": hits or sorted({_norm_email(a) for a in ext}),
+            })
+
+    hits = _blacklisted_hits(all_targets)
+    if hits:
+        return json.dumps({
+            "ok": False,
+            "error": "blacklisted",
+            "message": "Send denied: one or more recipients are blacklisted due to abusive/hostile contact.",
+            "from": from_addr, "to": to_addrs, "cc": cc_addrs, "bcc": bcc_addrs,
+            "subject": subject, "blacklisted": hits,
         })
     if not SMTP_USER or not SMTP_PASS:
         return json.dumps({
@@ -196,7 +310,7 @@ def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
     msg["Message-ID"] = make_msgid(domain="ffilt.us")
     if in_reply_to:
         msg["In-Reply-To"] = str(in_reply_to).strip()
-    refs = _addr_list(references) if not isinstance(references, str) else [r.strip() for r in re.split(r"[\s,]+", references) if r.strip()]
+    refs = _addr_list(references) if not isinstance(references, str) else [r.strip() for r in _re.split(r"[\s,]+", references) if r.strip()]
     if not refs and in_reply_to:
         refs = [str(in_reply_to).strip()]
     if refs:

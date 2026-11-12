@@ -687,7 +687,8 @@ def email_sync(folder: str = "INBOX") -> str:
 @agent_tool(family="email")
 def email_send(to, subject: str, body: str, sender: str = "rook@ffilt.us",
                cc=None, bcc=None, html: str | None = None,
-               in_reply_to: str | None = None, references=None) -> str:
+               in_reply_to: str | None = None, references=None,
+               reply_to_abusive: bool = False) -> str:
     """Send an email via Namecheap Private Email SMTP (mail.privateemail.com, 465 SSL
     with 587 STARTTLS fallback) as rook@ffilt.us.
 
@@ -696,12 +697,14 @@ def email_send(to, subject: str, body: str, sender: str = "rook@ffilt.us",
     - subject/body/html: message content. Outgoing messages always include Rook's
       introduction as an automated assistant for the Sutliff household.
     - in_reply_to/references: optional RFC threading headers for replies.
-    Returns structured JSON (ok/from/to/subject/transport/host/port/mode/message_id/
-    in_reply_to/references/refused or error). Never includes credential material.
+    - reply_to_abusive: if true, treats interaction as abusive/hostile, blacklists
+      involved external recipients, and denies send (persistent blacklist).
+    Enforces persistent send blacklist and returns structured JSON (ok/error). No secrets.
     """
     return email_tools.send(sender=sender, to=to, subject=subject, body=body,
                             html=html, cc=cc, bcc=bcc,
-                            in_reply_to=in_reply_to, references=references)
+                            in_reply_to=in_reply_to, references=references,
+                            reply_to_abusive=reply_to_abusive)
 
 
 # ================================================================ browser_*
