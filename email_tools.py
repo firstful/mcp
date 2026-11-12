@@ -104,8 +104,6 @@ def trigger_sync(folder: str = "INBOX") -> str:
         raise ToolError("tool_error", f"sync POST HTTP {e.code}: {e.read()[:200]!r}") from e
     except Exception as e:  # noqa: BLE001
         raise ToolError("tool_error", f"email-sync unreachable ({API}): {e}") from e
-<<<<<<< HEAD
-=======
 
 # ------------------------------ SMTP send ------------------------------
 
@@ -117,8 +115,11 @@ from email.utils import make_msgid, formatdate
 SMTP_HOST = os.environ.get("SMTP_HOST", "mail.privateemail.com")
 SMTP_USER = os.environ.get("SMTP_USERNAME") or os.environ.get("IMAP_USERNAME") or ""
 SMTP_PASS = os.environ.get("SMTP_PASSWORD") or os.environ.get("IMAP_PASSWORD") or ""
-SMTP_FROM_DEFAULT = os.environ.get("SMTP_FROM_DEFAULT", "reed@ffilt.us")
-_ALLOWED_FROM = {"reed@ffilt.us", "rook@ffilt.us", "alert@ffilt.us"}
+SMTP_FROM_DEFAULT = os.environ.get("SMTP_FROM_DEFAULT", "rook@ffilt.us")
+# Constraint (Reed, 2026-11-12): only send as rook for now.
+_ALLOWED_FROM = {"rook@ffilt.us"}
+ROOK_INTRO_PLAIN = "Hi, I'm Rook, an automated assistant for the Sutliff household.\n\n"
+ROOK_INTRO_HTML = "<p>Hi, I'm Rook, an automated assistant for the Sutliff household.</p>"
 
 
 def _addr_list(v):
@@ -142,14 +143,17 @@ def _addr_list(v):
 
 
 def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
-         body: str = "", html: str | None = None, cc=None, bcc=None) -> str:
+         body: str = "", html: str | None = None, cc=None, bcc=None,
+         in_reply_to: str | None = None, references=None) -> str:
     """Send an email via Namecheap Private Email SMTP.
 
     Auth uses SMTP_USERNAME/SMTP_PASSWORD (falls back to IMAP_USERNAME/IMAP_PASSWORD),
     same credentials as email-sync. Tries 465/SSL then 587/STARTTLS.
-    Returns structured JSON; never includes credential material.
+    Enforces From=rook@ffilt.us only and prepends Rook's automated-assistant intro.
+    Supports threading headers (In-Reply-To/References). Returns structured JSON;
+    never includes credential material.
     """
-    from_addr = (sender or SMTP_FROM_DEFAULT or "reed@ffilt.us").strip().lower()
+    from_addr = (sender or SMTP_FROM_DEFAULT or "rook@ffilt.us").strip().lower()
     if from_addr not in _ALLOWED_FROM:
         return json.dumps({
             "ok": False,
@@ -174,6 +178,14 @@ def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
             "from": from_addr, "to": to_addrs, "subject": subject,
         })
 
+    # Ensure Rook introduces itself as an automated assistant in every outgoing email.
+    plain_body = body or ""
+    if "automated assistant" not in plain_body.lower():
+        plain_body = ROOK_INTRO_PLAIN + plain_body
+    html_body = html
+    if html_body is not None and "automated assistant" not in html_body.lower():
+        html_body = ROOK_INTRO_HTML + html_body
+
     msg = EmailMessage()
     msg["From"] = from_addr
     msg["To"] = ", ".join(to_addrs)
@@ -182,9 +194,16 @@ def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
     msg["Subject"] = subject or ""
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid(domain="ffilt.us")
-    msg.set_content(body or "")
-    if html:
-        msg.add_alternative(html, subtype="html")
+    if in_reply_to:
+        msg["In-Reply-To"] = str(in_reply_to).strip()
+    refs = _addr_list(references) if not isinstance(references, str) else [r.strip() for r in re.split(r"[\s,]+", references) if r.strip()]
+    if not refs and in_reply_to:
+        refs = [str(in_reply_to).strip()]
+    if refs:
+        msg["References"] = " ".join(refs)
+    msg.set_content(plain_body)
+    if html_body is not None:
+        msg.add_alternative(html_body, subtype="html")
 
     all_rcpts = to_addrs + cc_addrs + bcc_addrs
     errors = []
@@ -215,6 +234,8 @@ def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
                 "port": port,
                 "mode": mode,
                 "message_id": msg.get("Message-ID"),
+                "in_reply_to": msg.get("In-Reply-To", ""),
+                "references": msg.get("References", ""),
                 "refused": refused or {},
             })
         except Exception as e:  # noqa: BLE001
@@ -230,4 +251,3 @@ def send(sender: str | None = None, to=None, recipients=None, subject: str = "",
         "host": SMTP_HOST,
         "attempts": errors,
     })
->>>>>>> mcp 2.3.9: sync deployed source, add email_send SMTP tool
