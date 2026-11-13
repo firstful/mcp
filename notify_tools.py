@@ -123,21 +123,20 @@ def _resolve_target(target: str | None) -> tuple[str, dict[str, Any]]:
 
 def _publish(topic: str, payload: dict[str, Any], priority: str, tags: list[str] | None,
              click_url: str | None, title: str) -> dict[str, Any]:
-    # ntfy JSON publish to base URL
-    url = NTFY_URL + "/"
-    body = {
-        "topic": topic,
-        "title": title[:250],
-        "message": (payload.get("body") or "")[:4000],
-        "priority": priority,
-        "tags": tags or ["rook", "discord"],
+    # Publish via topic path + headers (robust across ntfy configs/versions)
+    topic_enc = urllib.parse.quote(topic, safe="")
+    url = f"{NTFY_URL}/{topic_enc}"
+    msg = (payload.get("body") or "")[:4000]
+    headers = {
+        "Title": title[:250],
+        "Priority": (priority or "default"),
+        "Tags": ",".join(tags or ["rook", "discord"]),
     }
     if click_url:
-        body["click"] = click_url
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+        headers["Click"] = click_url
     if NTFY_TOKEN:
         headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
+    data = msg.encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
