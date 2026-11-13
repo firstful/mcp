@@ -51,6 +51,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 import browser_tools
 import docs_index
 import email_tools
+import notify_tools
 import gitea_mirror
 import gitea_tools
 import hermes_tools
@@ -97,7 +98,7 @@ mcp = FastMCP(
         "Tool families: todo_* (task store w/ leases), docs_* (homelab-docs FTS5),\n"
         "k3s_* (read-only cluster queries), gitea_* (read-only Gitea API),\n"
         "storage_* (host storage via system calls), system_* (opaque health checks),\n"
-        "browser_* (CDP browser session handoff — list/create/screenshot/interact/close).\n"
+        "browser_* (CDP browser session handoff — list/create/screenshot/interact/close),\n"        "notify_* (push notifications to Reed devices with Discord deep links).\n"
         "All tools return JSON strings. Prefer k3s_* over raw kubectl, system_* for health."
     ),
     transport_security=TransportSecuritySettings(
@@ -1001,6 +1002,38 @@ def api_delete(todo_id: int):
         return store.delete(todo_id)
     except TodoError as e:
         raise _http(e)
+
+
+# ================================================================ notify_*
+# Push notifications to registered devices via ntfy (ns `notify`).
+# Use notify_push when Reed's input/attention is needed; include a Discord
+# deep link (discord_url or guild_id/channel_id[/message_id]) so tapping the
+# notification opens the relevant conversation/thread.
+
+@agent_tool(family="notify")
+def notify_push(title: str, body: str, target: str | None = None,
+                discord_url: str | None = None, guild_id: str | None = None,
+                channel_id: str | None = None, message_id: str | None = None,
+                priority: str = "high", tags: list[str] | None = None,
+                click_url: str | None = None, dedupe_key: str | None = None,
+                source: str | None = None) -> str:
+    """Send a push notification to a registered device (default: Reed) with an
+    optional Discord deep link. Provide `discord_url` OR `guild_id`+`channel_id`
+    (+ optional `message_id`) to open the conversation/thread on tap. `priority`:
+    min|low|default|high|urgent. Requires NOTIFY_TARGETS/NOTIFY_NTFY_* config on
+    the MCP server; returns structured status (no secrets)."""
+    return notify_tools.push(title=title, body=body, target=target,
+                             discord_url=discord_url, guild_id=guild_id,
+                             channel_id=channel_id, message_id=message_id,
+                             priority=priority, tags=tags, click_url=click_url,
+                             dedupe_key=dedupe_key, source=source)
+
+
+@agent_tool(family="notify")
+def notify_targets() -> str:
+    """List configured notify push targets (ids/labels/enabled, topic hints only)
+    and broker config status. No secrets."""
+    return notify_tools.targets()
 
 
 # MCP app served at /mcp (its own internal route). Mount at root.
