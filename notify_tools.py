@@ -135,14 +135,9 @@ def _publish(topic: str, payload: dict[str, Any], priority: str, tags: list[str]
     if click_url:
         body["click"] = click_url
         body["actions"] = [{"action": "view", "label": "Open in Discord", "url": click_url, "clear": True}]
-    # include structured data for the app
-    extras = {}
-    for k in ("discord_url", "guild_id", "channel_id", "message_id", "source", "dedupe_key"):
-        v = payload.get(k)
-        if v not in (None, ""):
-            extras[k] = v
-    if extras:
-        body["extras"] = extras
+    # include structured data in tags/click; avoid nonstandard fields for ntfy JSON publish compatibility
+    if payload.get("dedupe_key"):
+        body["X-Dedupe-Key"] = str(payload.get("dedupe_key"))[:128]  # ignored by ntfy but harmless if stripped; app parses click/title/body
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if NTFY_TOKEN:
