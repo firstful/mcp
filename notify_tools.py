@@ -134,8 +134,6 @@ def _publish(topic: str, payload: dict[str, Any], priority: str, tags: list[str]
     }
     if click_url:
         body["click"] = click_url
-        body["actions"] = [{"action": "view", "label": "Open in Discord", "url": click_url, "clear": True}]
-    # v1: keep payload to ntfy-supported fields only (dedupe_key not forwarded)
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if NTFY_TOKEN:
