@@ -35,7 +35,7 @@ def _req(path: str, headers: dict | None = None, timeout: int = 20):
         raise ToolError("tool_error", f"email-sync unreachable ({API}): {e}") from e
 
 
-def _json(path: str, **params) -> dict:
+def _fetch_json(path: str, **params) -> dict:
     if params:
         qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         path = f"{path}?{qs}" if "?" not in path else f"{path}&{qs}"
@@ -48,7 +48,7 @@ def _json(path: str, **params) -> dict:
 
 def status() -> str:
     """GET /healthz — service liveness plus inbox/unseen counters."""
-    return json.dumps(_json("/healthz"))
+    return json.dumps(_fetch_json("/healthz"))
 
 
 def search(folder: str = "INBOX", limit: int = 25, unseen: bool | None = None,
@@ -56,7 +56,7 @@ def search(folder: str = "INBOX", limit: int = 25, unseen: bool | None = None,
     """Envelope-only message list (metadata: uid/subject/from/date/size — NO bodies).
     limit <= 500. unseen=true filters to unseen. q matches subject/from/raw."""
     limit = max(1, min(int(limit), 500))
-    return json.dumps(_json("/mail", folder=folder, limit=limit,
+    return json.dumps(_fetch_json("/mail", folder=folder, limit=limit,
                             unseen=("1" if unseen else None) if unseen is not None else None,
                             search=q))
 
@@ -64,7 +64,7 @@ def search(folder: str = "INBOX", limit: int = 25, unseen: bool | None = None,
 def message_meta(uid: str, folder: str = "INBOX") -> str:
     """One message's metadata: headers, subject, date, size, attachment list.
     No body — use email_fetch_body (audited) when content is genuinely needed."""
-    return json.dumps(_json(f"/mail/{urllib.parse.quote(str(uid))}", folder=folder))
+    return json.dumps(_fetch_json(f"/mail/{urllib.parse.quote(str(uid))}", folder=folder))
 
 
 def fetch_body(uid: str, folder: str = "INBOX", reason: str = "") -> str:
@@ -88,7 +88,7 @@ def audit(limit: int = 20) -> str:
     the receipt log: check here to see whether a body was ALREADY fetched
     before fetching again."""
     limit = max(1, min(int(limit), 200))
-    return json.dumps(_json("/audit/body-access", limit=limit))
+    return json.dumps(_fetch_json("/audit/body-access", limit=limit))
 
 
 def trigger_sync(folder: str = "INBOX") -> str:
